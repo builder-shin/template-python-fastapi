@@ -1,0 +1,25 @@
+name: template-python-fastapi-test
+
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: fastapi_template_test
+      POSTGRES_USER: fastapi
+      POSTGRES_PASSWORD: fastapi # pragma: allowlist secret
+    ports:
+      - target: 5432
+        published: "${TEST_DB_PORT:-55432}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - test_postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fastapi -d fastapi_template_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+volumes:
+  test_postgres_data:

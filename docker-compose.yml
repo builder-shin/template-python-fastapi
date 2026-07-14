@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-fastapi_template}
+      POSTGRES_USER: ${POSTGRES_USER:-fastapi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fastapi}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fastapi} -d ${POSTGRES_DB:-fastapi_template}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-fastapi}:${POSTGRES_PASSWORD:-fastapi}@db:5432/${POSTGRES_DB:-fastapi_template}} # pragma: allowlist secret
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-fastapi}:${POSTGRES_PASSWORD:-fastapi}@db:5432/${POSTGRES_DB:-fastapi_template}} # pragma: allowlist secret
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "4000:4000"
+
+volumes:
+  postgres_data:
