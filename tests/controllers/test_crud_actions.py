@@ -101,6 +101,22 @@ class ScopedCrudController(ExampleCrudController):
         return values
 
 
+dependency_log: list[str] = []
+
+
+def record_read_dependency() -> None:
+    dependency_log.append("read")
+
+
+def record_write_dependency() -> None:
+    dependency_log.append("write")
+
+
+class DependencyCrudController(ExampleCrudController):
+    read_dependencies = (record_read_dependency,)
+    write_dependencies = (record_write_dependency,)
+
+
 class DeleteRelationshipDocument(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -680,3 +696,29 @@ def test_openapi_exposes_concrete_write_document_schemas(crud_app: FastAPI) -> N
     destroy_responses = schema_document["paths"]["/api/v1/examples/{resource_id}"]["delete"]["responses"]
     assert "content" not in destroy_responses["204"]
     assert set(destroy_responses["400"]["content"]) == {JSONAPI_MEDIA_TYPE}
+
+
+def test_resource_routes_apply_declared_read_and_write_dependencies(
+    db_engine: Engine,
+) -> None:
+    dependency_log.clear()
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(DependencyCrudController(prefix="/dependency-examples", tags=["examples"]).router)
+
+    def override_session() -> Iterator[Session]:
+        with Session(bind=db_engine, expire_on_commit=False) as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    with TestClient(app, raise_server_exceptions=False) as client:
+        read_response = client.get("/dependency-examples")
+        write_response = client.post(
+            "/dependency-examples",
+            headers={"Content-Type": JSONAPI_MEDIA_TYPE},
+            json=_document(),
+        )
+
+    assert read_response.status_code == 200
+    assert write_response.status_code == 201
+    assert dependency_log == ["read", "write"]

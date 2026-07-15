@@ -91,3 +91,27 @@ def test_get_session_closes_session(monkeypatch: pytest.MonkeyPatch) -> None:
     assert next(generator) is fake_session
     generator.close()
     fake_context.__exit__.assert_called_once()
+
+
+def test_get_auth_session_yields_a_separate_session_and_closes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    crud_session = MagicMock(spec=Session)
+    auth_session = MagicMock(spec=Session)
+    crud_context = MagicMock()
+    auth_context = MagicMock()
+    crud_context.__enter__.return_value = crud_session
+    auth_context.__enter__.return_value = auth_session
+    contexts = iter((crud_context, auth_context))
+    monkeypatch.setattr(database, "SessionFactory", lambda: next(contexts))
+
+    crud_generator = database.get_session()
+    auth_generator = database.get_auth_session()
+
+    assert next(crud_generator) is crud_session
+    assert next(auth_generator) is auth_session
+    assert crud_session is not auth_session
+    crud_generator.close()
+    auth_generator.close()
+    crud_context.__exit__.assert_called_once()
+    auth_context.__exit__.assert_called_once()

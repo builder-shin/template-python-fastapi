@@ -60,6 +60,7 @@ type RelationshipMutation = Literal["add", "replace", "remove"]
 
 _ERROR_DESCRIPTIONS = {
     400: "Invalid JSON:API request",
+    401: "Authentication required",
     403: "Forbidden",
     404: "Resource not found",
     406: "Not acceptable",
@@ -96,6 +97,8 @@ class CrudActions[
     relationships_schema: type[BaseModel] | None = None
     query_policy: QueryPolicy
     enable_upsert = False
+    read_dependencies: tuple[Callable[..., Any], ...] = ()
+    write_dependencies: tuple[Callable[..., Any], ...] = ()
 
     def __init__(self, *, prefix: str, tags: list[str]) -> None:
         if not prefix.startswith("/") or prefix.endswith("/"):
@@ -156,6 +159,7 @@ class CrudActions[
             response_class=JsonApiResponse,
             response_model=SuccessDocument,
             responses=_jsonapi_error_responses(400, 406, 422, 500),
+            dependencies=[Depends(dependency) for dependency in self.read_dependencies],
             name=f"{type(self).__name__}.index",
         )
         self.router.add_api_route(
@@ -165,7 +169,8 @@ class CrudActions[
             response_class=JsonApiResponse,
             response_model=SuccessDocument,
             status_code=201,
-            responses=_jsonapi_error_responses(400, 403, 406, 409, 415, 422, 500),
+            responses=self._write_error_responses(400, 403, 406, 409, 415, 422, 500),
+            dependencies=[Depends(dependency) for dependency in self.write_dependencies],
             name=f"{type(self).__name__}.create",
         )
         self.router.add_api_route(
@@ -175,6 +180,7 @@ class CrudActions[
             response_class=JsonApiResponse,
             response_model=SuccessDocument,
             responses=_jsonapi_error_responses(400, 404, 406, 422, 500),
+            dependencies=[Depends(dependency) for dependency in self.read_dependencies],
             name=f"{type(self).__name__}.show",
         )
         self.router.add_api_route(
@@ -183,7 +189,8 @@ class CrudActions[
             methods=["PATCH"],
             response_class=JsonApiResponse,
             response_model=SuccessDocument,
-            responses=_jsonapi_error_responses(400, 404, 406, 409, 415, 422, 500),
+            responses=self._write_error_responses(400, 404, 406, 409, 415, 422, 500),
+            dependencies=[Depends(dependency) for dependency in self.write_dependencies],
             name=f"{type(self).__name__}.update",
         )
         if self.enable_upsert:
@@ -204,8 +211,9 @@ class CrudActions[
                             }
                         },
                     },
-                    **_jsonapi_error_responses(400, 404, 406, 409, 415, 422, 500),
+                    **self._write_error_responses(400, 404, 406, 409, 415, 422, 500),
                 },
+                dependencies=[Depends(dependency) for dependency in self.write_dependencies],
                 name=f"{type(self).__name__}.upsert",
             )
         self.router.add_api_route(
@@ -214,7 +222,8 @@ class CrudActions[
             methods=["DELETE"],
             status_code=204,
             response_class=JsonApiResponse,
-            responses=_jsonapi_error_responses(400, 404, 406, 422, 500),
+            responses=self._write_error_responses(400, 404, 406, 422, 500),
+            dependencies=[Depends(dependency) for dependency in self.write_dependencies],
             name=f"{type(self).__name__}.destroy",
         )
 
@@ -231,6 +240,7 @@ class CrudActions[
                 response_class=JsonApiResponse,
                 response_model=RelationshipDocument,
                 responses=_jsonapi_error_responses(400, 404, 406, 422, 500),
+                dependencies=[Depends(dependency) for dependency in self.read_dependencies],
                 name=f"{type(self).__name__}.relationship.{public_name}.show",
             )
             self.router.add_api_route(
@@ -240,6 +250,7 @@ class CrudActions[
                 response_class=JsonApiResponse,
                 response_model=SuccessDocument,
                 responses=_jsonapi_error_responses(400, 404, 406, 422, 500),
+                dependencies=[Depends(dependency) for dependency in self.read_dependencies],
                 name=f"{type(self).__name__}.relationship.{public_name}.related",
             )
 
@@ -261,9 +272,15 @@ class CrudActions[
                     methods=[methods[mutation]],
                     status_code=204,
                     response_class=JsonApiResponse,
-                    responses=_jsonapi_error_responses(400, 404, 406, 409, 415, 422, 500),
+                    responses=self._write_error_responses(400, 404, 406, 409, 415, 422, 500),
+                    dependencies=[Depends(dependency) for dependency in self.write_dependencies],
                     name=f"{type(self).__name__}.relationship.{public_name}.{mutation}",
                 )
+
+    def _write_error_responses(self, *status_codes: int) -> dict[int | str, dict[str, Any]]:
+        if self.write_dependencies:
+            status_codes = tuple(dict.fromkeys((401, 403, *status_codes)))
+        return _jsonapi_error_responses(*status_codes)
 
     def _create_delegate(self) -> Callable[..., JsonApiResponse]:
         def create_endpoint(

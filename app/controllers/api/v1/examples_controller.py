@@ -1,5 +1,6 @@
 """Example JSON:API resource controller."""
 
+from app.auth.dependencies import get_current_active_user
 from app.controllers.concerns import CrudActions
 from app.models import Example
 from app.schemas import (
@@ -23,3 +24,4 @@ class ExamplesController(CrudActions[Example, ExampleCreate, ExampleUpdate, Exam
     relationships_schema = ExampleRelationships
     query_policy = EXAMPLE_QUERY_POLICY
     enable_upsert = True
+    write_dependencies = (get_current_active_user,)

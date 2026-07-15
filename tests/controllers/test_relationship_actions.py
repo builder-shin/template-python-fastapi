@@ -42,6 +42,22 @@ class ReadOnlyRelationshipController(RelationshipController):
     relationships_schema = None
 
 
+relationship_dependency_log: list[str] = []
+
+
+def record_relationship_read_dependency() -> None:
+    relationship_dependency_log.append("read")
+
+
+def record_relationship_write_dependency() -> None:
+    relationship_dependency_log.append("write")
+
+
+class DependencyRelationshipController(RelationshipController):
+    read_dependencies = (record_relationship_read_dependency,)
+    write_dependencies = (record_relationship_write_dependency,)
+
+
 @pytest.fixture
 def relationship_client(db_engine: Engine) -> Iterator[TestClient]:
     app = FastAPI()
@@ -164,6 +180,38 @@ def test_response_only_relationships_do_not_register_mutation_routes() -> None:
 
     assert set(paths["/read-only-examples/{resource_id}/relationships/category"]) == {"get"}
     assert set(paths["/read-only-examples/{resource_id}/relationships/tags"]) == {"get"}
+
+
+def test_relationship_routes_apply_declared_read_and_write_dependencies(
+    db_engine: Engine,
+    committed_session: Session,
+) -> None:
+    relationship_dependency_log.clear()
+    example = _example(committed_session)
+    tag = ExampleTag(name="의존성 태그")
+    committed_session.add(tag)
+    committed_session.commit()
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(DependencyRelationshipController(prefix="/dependency-examples", tags=["examples"]).router)
+
+    def override_session() -> Iterator[Session]:
+        with Session(bind=db_engine, expire_on_commit=False) as session:
+            yield session
+
+    app.dependency_overrides[get_session] = override_session
+    path = f"/dependency-examples/{example.id}/relationships/tags"
+    with TestClient(app, raise_server_exceptions=False) as client:
+        read_response = client.get(path)
+        write_response = client.post(
+            path,
+            headers={"Content-Type": JSONAPI_MEDIA_TYPE},
+            json={"data": [_identifier("exampleTags", tag.id)]},
+        )
+
+    assert read_response.status_code == 200
+    assert write_response.status_code == 204
+    assert relationship_dependency_log == ["read", "write"]
 
 
 def test_relationship_mutation_serializes_on_the_parent_row(

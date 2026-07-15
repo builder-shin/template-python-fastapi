@@ -62,3 +62,10 @@ def get_session() -> Iterator[Session]:
 
     with SessionFactory() as session:
         yield session
+
+
+def get_auth_session() -> Iterator[Session]:
+    """Yield a separate request-scoped session for authentication lookup."""
+
+    with SessionFactory() as session:
+        yield session
