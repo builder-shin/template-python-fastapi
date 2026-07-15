@@ -85,10 +85,15 @@ def _create_document(*, title: str = "보호된 생성") -> dict[str, object]:
     }
 
 
-def test_openapi_exposes_only_declared_example_resource_operations(app: FastAPI) -> None:
-    paths = {path: item for path, item in app.openapi()["paths"].items() if path.startswith("/api/v1/examples")}
+def test_openapi_exposes_only_declared_application_operations(app: FastAPI) -> None:
+    schema = app.openapi()
 
-    assert {path: set(item) for path, item in paths.items()} == {
+    assert {path: set(item) for path, item in schema["paths"].items()} == {
+        "/api/v1/auth/login": {"post"},
+        "/api/v1/auth/logout": {"post"},
+        "/api/v1/auth/refresh": {"post"},
+        "/api/v1/auth/register": {"post"},
+        "/api/v1/users/me": {"get"},
         "/api/v1/examples": {"get", "post"},
         "/api/v1/examples/{resource_id}": {"get", "patch", "put", "delete"},
         "/api/v1/examples/{resource_id}/relationships/category": {"get", "patch"},
@@ -100,6 +105,12 @@ def test_openapi_exposes_only_declared_example_resource_operations(app: FastAPI)
             "delete",
         },
         "/api/v1/examples/{resource_id}/tags": {"get"},
+        "/health/live": {"get"},
+        "/health/ready": {"get"},
+    }
+    assert schema["components"]["securitySchemes"]["BearerAuth"] == {
+        "type": "http",
+        "scheme": "bearer",
     }
 
 
@@ -136,6 +147,8 @@ def test_application_exposes_only_explicitly_composed_routes(app: FastAPI) -> No
         "/api/v1/examples/{resource_id}/category",
         "/api/v1/examples/{resource_id}/relationships/tags",
         "/api/v1/examples/{resource_id}/tags",
+        "/health/live",
+        "/health/ready",
     }
 
 

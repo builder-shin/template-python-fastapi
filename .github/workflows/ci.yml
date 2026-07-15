@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: uv 설정
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.9.30"
+          enable-cache: true
+
+      - name: 고정된 의존성 설치
+        run: uv sync --frozen
+
+      - name: 실제 PostgreSQL 기반 전체 검사
+        run: ./scripts/check.sh
+
+      - name: Compose 설정 검증
+        run: docker compose config --quiet
+
+      - name: 운영 runtime 이미지 빌드
+        run: docker build --target runtime --tag template-python-fastapi:ci .
