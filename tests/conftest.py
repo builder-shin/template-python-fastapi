@@ -15,6 +15,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import Base
 
+os.environ.setdefault(
+    "JWT_SECRET_KEY",
+    "test-only-jwt-secret-key-at-least-32-bytes",  # pragma: allowlist secret
+)
+
 API_ROOT = Path(__file__).resolve().parents[1]
 
 

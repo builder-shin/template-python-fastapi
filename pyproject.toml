@@ -7,9 +7,13 @@ readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
     "alembic>=1.16,<2.0",
+    "dramatiq[redis]>=2.2,<3",
+    "email-validator>=2.2,<3",
     "fastapi>=0.115",
     "psycopg[binary]>=3.2,<4.0",
+    "pwdlib[argon2]>=0.2,<1",
     "pydantic>=2.12,<3.0",
+    "pyjwt>=2.12,<3",
     "sqlalchemy>=2.0,<3.0",
     "uvicorn[standard]>=0.32",
 ]
