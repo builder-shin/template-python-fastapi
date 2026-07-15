@@ -21,3 +21,4 @@ node_modules/
 .jwshin/
 docs/
 .worktrees/
+.superpowers/
