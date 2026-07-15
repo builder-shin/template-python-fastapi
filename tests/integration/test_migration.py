@@ -49,7 +49,23 @@ def test_upgrade_head_builds_required_tables_in_an_empty_database(
             "tags",
             "examples",
             "example_tags",
+            "users",
+            "refresh_sessions",
         }
+
+        command.downgrade(config, "20260714_0001")
+
+        assert set(inspect(migrated_engine).get_table_names()) == {
+            "alembic_version",
+            "categories",
+            "tags",
+            "examples",
+            "example_tags",
+        }
+
+        command.upgrade(config, "head")
+
+        assert {"users", "refresh_sessions"}.issubset(inspect(migrated_engine).get_table_names())
     finally:
         migrated_engine.dispose()
         with admin_engine.connect() as connection:
