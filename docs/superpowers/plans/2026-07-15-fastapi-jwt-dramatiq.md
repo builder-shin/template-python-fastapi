@@ -33,7 +33,7 @@
 
 예상: `127.0.0.1:` 뒤에 숫자 port가 붙은 endpoint를 현재 shell 변수에 저장.
 
-실행: `export TEST_DATABASE_URL="postgresql+psycopg://fastapi:fastapi@127.0.0.1:${TEST_DATABASE_ENDPOINT##*:}/fastapi_template_test"`
+실행: `export TEST_DATABASE_URL="postgresql+psycopg://fastapi:fastapi@127.0.0.1:${TEST_DATABASE_ENDPOINT##*:}/fastapi_template_test"` <!-- pragma: allowlist secret -->
 
 예상: 현재 shell에 URL 설정. 이후 모든 부분 pytest와 Alembic 명령은 이 shell에서 실행한다.
 
@@ -649,11 +649,11 @@ git commit -m "docs: document JWT and Dramatiq workflows"
 
 예상: HTTP 200.
 
-실행: `curl -i -sS -X POST -H 'Accept: application/vnd.api+json' -H 'Content-Type: application/vnd.api+json' --data '{"data":{"type":"users","attributes":{"email":"compose@example.com","password":"compose-password-123"}}}' http://localhost:4000/api/v1/auth/register`
+실행: `curl -i -sS -X POST -H 'Accept: application/vnd.api+json' -H 'Content-Type: application/vnd.api+json' --data '{"data":{"type":"users","attributes":{"email":"compose@example.com","password":"compose-password-123"}}}' http://localhost:4000/api/v1/auth/register` <!-- pragma: allowlist secret -->
 
 예상: HTTP 201, Location `/api/v1/users/me`, password 미노출.
 
-실행: `ACCESS_TOKEN="$(curl -fsS -X POST -H 'Accept: application/vnd.api+json' -H 'Content-Type: application/vnd.api+json' --data '{"data":{"type":"authCredentials","attributes":{"email":"compose@example.com","password":"compose-password-123"}}}' http://localhost:4000/api/v1/auth/login | python -c 'import json,sys; print(json.load(sys.stdin)["data"]["attributes"]["accessToken"])')"`
+실행: `ACCESS_TOKEN="$(curl -fsS -X POST -H 'Accept: application/vnd.api+json' -H 'Content-Type: application/vnd.api+json' --data '{"data":{"type":"authCredentials","attributes":{"email":"compose@example.com","password":"compose-password-123"}}}' http://localhost:4000/api/v1/auth/login | python -c 'import json,sys; print(json.load(sys.stdin)["data"]["attributes"]["accessToken"])')"` <!-- pragma: allowlist secret -->
 
 예상: HTTP 200 authTokens document에서 accessToken을 현재 shell 변수에만 저장하고 stdout·파일·커밋에는 기록하지 않는다.
 
