@@ -50,7 +50,7 @@ def _persist_example(session: Session) -> Example:
 
 
 def test_openapi_exposes_only_declared_example_resource_operations(app: FastAPI) -> None:
-    paths = app.openapi()["paths"]
+    paths = {path: item for path, item in app.openapi()["paths"].items() if path.startswith("/api/v1/examples")}
 
     assert {path: set(item) for path, item in paths.items()} == {
         "/api/v1/examples": {"get", "post"},
@@ -85,10 +85,12 @@ def test_index_returns_jsonapi_collection(
     assert response.json()["data"][0]["attributes"]["title"] == "통합 예시"
 
 
-def test_application_exposes_documentation_and_example_routes_only(app: FastAPI) -> None:
+def test_application_exposes_only_explicitly_composed_routes(app: FastAPI) -> None:
     assert {route.path for route in app.routes if isinstance(route, Route)} == {
         "/api/schema",
         "/api-docs",
+        "/api/v1/auth/login",
+        "/api/v1/auth/register",
         "/api/v1/examples",
         "/api/v1/examples/{resource_id}",
         "/api/v1/examples/{resource_id}/relationships/category",

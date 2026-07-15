@@ -20,8 +20,8 @@ from app.auth.tokens import (
 )
 from config.auth import AuthSettings
 
-SECRET = "s" * 64
-OTHER_SECRET = "o" * 64
+SECRET = "s" * 64  # pragma: allowlist secret
+OTHER_SECRET = "o" * 64  # pragma: allowlist secret
 FIXED_NOW = datetime(2026, 7, 15, 3, 0, tzinfo=UTC)
 FIXED_JTI = UUID("31ef8582-5418-4e62-891c-cfc22d356e5a")
 
@@ -228,7 +228,9 @@ def test_expired_refresh_decoder_requires_all_claims(settings: AuthSettings) -> 
 
 
 def test_refresh_token_hash_is_sha256_hex() -> None:
-    assert hash_refresh_token("refresh-token") == ("0eb17643d4e9261163783a420859c92c7d212fa9624106a12b510afbec266120")
+    assert hash_refresh_token("refresh-token") == (
+        "0eb17643d4e9261163783a420859c92c7d212fa9624106a12b510afbec266120"  # pragma: allowlist secret
+    )
 
 
 def test_refresh_token_matching_uses_constant_time_comparison(

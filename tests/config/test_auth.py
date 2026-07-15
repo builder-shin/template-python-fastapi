@@ -51,7 +51,7 @@ def test_auth_settings_accept_a_32_byte_secret_and_use_defaults(monkeypatch: pyt
     settings = AuthSettings.from_env()
 
     assert settings == AuthSettings(
-        secret_key="a" * 32,
+        secret_key="a" * 32,  # pragma: allowlist secret
         issuer="template-python-fastapi",
         audience="template-python-fastapi",
         access_expires_seconds=900,
@@ -71,7 +71,7 @@ def test_auth_settings_read_environment_overrides(monkeypatch: pytest.MonkeyPatc
 
     settings = AuthSettings.from_env()
 
-    assert settings.secret_key == "é" * 16
+    assert settings.secret_key == "é" * 16  # pragma: allowlist secret
     assert settings.issuer == "custom-issuer"
     assert settings.audience == "custom-audience"
     assert settings.access_expires_seconds == 30
