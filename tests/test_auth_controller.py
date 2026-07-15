@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from datetime import UTC, datetime, timedelta
+from threading import Barrier, Event
 from typing import cast
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -15,7 +17,8 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
 from app.auth.passwords import DUMMY_PASSWORD_HASH, hash_password, verify_password
-from app.auth.tokens import decode_token, hash_refresh_token
+from app.auth.refresh_sessions import issue_token_pair
+from app.auth.tokens import create_token, decode_token, hash_refresh_token
 from app.jsonapi import JSONAPI_MEDIA_TYPE
 from app.models import RefreshSession, User
 from config.auth import AuthSettings
@@ -67,6 +70,15 @@ def _login_document(
         "data": {
             "type": "authCredentials",
             "attributes": {"email": email, "password": password},
+        }
+    }
+
+
+def _refresh_document(refresh_token: str) -> dict[str, object]:
+    return {
+        "data": {
+            "type": "refreshTokens",
+            "attributes": {"refreshToken": refresh_token},
         }
     }
 
@@ -377,9 +389,71 @@ def test_login_rejects_inactive_user_in_korean(
     assert committed_session.scalar(select(func.count()).select_from(RefreshSession)) == 0
 
 
-@pytest.mark.parametrize("path", ["/api/v1/auth/register", "/api/v1/auth/login"])
+def test_login_rechecks_active_state_after_concurrent_deactivation(
+    app: FastAPI,
+    concurrent_session_factory: Callable[[], Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup_session = concurrent_session_factory()
+    user = _persist_user(setup_session)
+    setup_session.close()
+    password_checked = Event()
+    allow_login_to_lock = Event()
+    from app.controllers.api.v1 import auth_controller
+
+    real_verify_password = auth_controller.verify_password
+
+    def pause_after_password_check(password: str, password_hash: str) -> bool:
+        matches = real_verify_password(password, password_hash)
+        password_checked.set()
+        if not allow_login_to_lock.wait(timeout=10):
+            raise TimeoutError("login lock permission timed out")
+        return matches
+
+    monkeypatch.setattr(auth_controller, "verify_password", pause_after_password_check)
+
+    def login():  # type: ignore[no-untyped-def]
+        with TestClient(app, raise_server_exceptions=False) as thread_client:
+            return _post_jsonapi(
+                thread_client,
+                "/api/v1/auth/login",
+                _login_document(),
+                accept_language="en",
+            )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        login_future = executor.submit(login)
+        assert password_checked.wait(timeout=10)
+        with concurrent_session_factory() as deactivation_session, deactivation_session.begin():
+            current_user = deactivation_session.get(User, user.id)
+            assert current_user is not None
+            current_user.is_active = False
+        allow_login_to_lock.set()
+        response = login_future.result(timeout=10)
+
+    assert response.status_code == 403
+    assert response.headers["content-type"] == JSONAPI_MEDIA_TYPE
+    assert response.json()["errors"][0]["code"] == "USER_INACTIVE"
+    with concurrent_session_factory() as verification_session:
+        assert verification_session.scalar(select(func.count()).select_from(RefreshSession)) == 0
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/auth/register",
+        "/api/v1/auth/login",
+        "/api/v1/auth/refresh",
+        "/api/v1/auth/logout",
+    ],
+)
 def test_auth_write_routes_enforce_accept_and_content_type(client: TestClient, path: str) -> None:
-    document = _register_document() if path.endswith("register") else _login_document()
+    if path.endswith("register"):
+        document = _register_document()
+    elif path.endswith("login"):
+        document = _login_document()
+    else:
+        document = _refresh_document("not-a-jwt")
 
     unacceptable = client.post(
         path,
@@ -426,3 +500,231 @@ def test_issue_token_pair_leaves_commit_to_the_caller(
 
     assert db_session.get(RefreshSession, token_pair.id) is not None
     assert db_session.in_transaction() is True
+
+
+def test_refresh_rotates_token_and_persists_the_replacement(
+    client: TestClient,
+    committed_session: Session,
+    app: FastAPI,
+) -> None:
+    user = _persist_user(committed_session)
+    login_response = _post_jsonapi(client, "/api/v1/auth/login", _login_document())
+    original_resource = login_response.json()["data"]
+    original_token = original_resource["attributes"]["refreshToken"]
+    original_id = original_resource["id"]
+
+    response = _post_jsonapi(
+        client,
+        "/api/v1/auth/refresh",
+        _refresh_document(original_token),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == JSONAPI_MEDIA_TYPE
+    resource = response.json()["data"]
+    assert resource["type"] == "authTokens"
+    assert resource["id"] != original_id
+    settings = cast(AuthSettings, app.state.auth_settings)
+    claims = decode_token(
+        resource["attributes"]["refreshToken"],
+        expected_type="refresh",
+        settings=settings,
+    )
+    assert claims.sub == str(user.id)
+
+    committed_session.expire_all()
+    old_row = committed_session.get(RefreshSession, original_id)
+    new_row = committed_session.get(RefreshSession, claims.jti)
+    assert old_row is not None
+    assert old_row.revoked_at is not None
+    assert old_row.replaced_by_id == claims.jti
+    assert new_row is not None
+    assert new_row.revoked_at is None
+
+
+def test_reusing_rotated_token_revokes_only_that_users_active_sessions(
+    client: TestClient,
+    committed_session: Session,
+) -> None:
+    first_user = _persist_user(committed_session)
+    other_user = _persist_user(
+        committed_session,
+        email="other@example.com",
+    )
+    first_login = _post_jsonapi(client, "/api/v1/auth/login", _login_document()).json()["data"]
+    second_login = _post_jsonapi(client, "/api/v1/auth/login", _login_document()).json()["data"]
+    other_login = _post_jsonapi(
+        client,
+        "/api/v1/auth/login",
+        _login_document(email="other@example.com"),
+    ).json()["data"]
+    original_token = first_login["attributes"]["refreshToken"]
+
+    rotated = _post_jsonapi(
+        client,
+        "/api/v1/auth/refresh",
+        _refresh_document(original_token),
+    )
+    reused = _post_jsonapi(
+        client,
+        "/api/v1/auth/refresh",
+        _refresh_document(original_token),
+        accept_language="en",
+    )
+
+    assert rotated.status_code == 200
+    assert reused.status_code == 401
+    assert reused.json()["errors"][0]["code"] == "TOKEN_REVOKED"
+
+    committed_session.expire_all()
+    first_active = committed_session.scalar(
+        select(func.count())
+        .select_from(RefreshSession)
+        .where(RefreshSession.user_id == first_user.id, RefreshSession.revoked_at.is_(None))
+    )
+    other_active = committed_session.scalar(
+        select(func.count())
+        .select_from(RefreshSession)
+        .where(RefreshSession.user_id == other_user.id, RefreshSession.revoked_at.is_(None))
+    )
+    assert first_active == 0
+    assert other_active == 1
+    assert second_login["id"] != first_login["id"]
+    assert other_login["id"] != first_login["id"]
+
+
+def test_inactive_user_refresh_revokes_session_before_returning_403(
+    client: TestClient,
+    committed_session: Session,
+) -> None:
+    user = _persist_user(committed_session)
+    resource = _post_jsonapi(client, "/api/v1/auth/login", _login_document()).json()["data"]
+    user.is_active = False
+    committed_session.commit()
+
+    response = _post_jsonapi(
+        client,
+        "/api/v1/auth/refresh",
+        _refresh_document(resource["attributes"]["refreshToken"]),
+        accept_language="ko",
+    )
+
+    assert response.status_code == 403
+    assert response.headers["content-type"] == JSONAPI_MEDIA_TYPE
+    assert response.json()["errors"][0]["code"] == "USER_INACTIVE"
+    committed_session.expire_all()
+    assert committed_session.get(RefreshSession, resource["id"]).revoked_at is not None  # type: ignore[union-attr]
+
+
+def test_concurrent_refresh_has_one_rotation_then_reuse_revokes_it(
+    app: FastAPI,
+    concurrent_session_factory: Callable[[], Session],
+) -> None:
+    setup_session = concurrent_session_factory()
+    settings = cast(AuthSettings, app.state.auth_settings)
+    with setup_session.begin():
+        user = User(
+            email="refresh-race@example.com",
+            password_hash=hash_password(PASSWORD),
+        )
+        setup_session.add(user)
+        setup_session.flush()
+        original = issue_token_pair(setup_session, user, settings)
+    setup_session.close()
+    barrier = Barrier(2)
+
+    def refresh() -> tuple[int, str | None]:
+        with TestClient(app, raise_server_exceptions=False) as thread_client:
+            barrier.wait()
+            response = _post_jsonapi(
+                thread_client,
+                "/api/v1/auth/refresh",
+                _refresh_document(original.refresh_token),
+            )
+            error_code = response.json().get("errors", [{}])[0].get("code")
+            return response.status_code, cast(str | None, error_code)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(lambda _: refresh(), range(2)))
+
+    assert sorted(outcomes) == [(200, None), (401, "TOKEN_REVOKED")]
+    verification_session = concurrent_session_factory()
+    rows = list(verification_session.scalars(select(RefreshSession).where(RefreshSession.user_id == user.id)))
+    assert len(rows) == 2
+    assert sum(row.replaced_by_id is not None for row in rows) == 1
+    assert all(row.revoked_at is not None for row in rows)
+
+
+def test_logout_is_empty_idempotent_and_rejects_invalid_token(
+    client: TestClient,
+    committed_session: Session,
+) -> None:
+    user = _persist_user(committed_session)
+    resource = _post_jsonapi(client, "/api/v1/auth/login", _login_document()).json()["data"]
+    raw_token = resource["attributes"]["refreshToken"]
+
+    first = _post_jsonapi(client, "/api/v1/auth/logout", _refresh_document(raw_token))
+    second = _post_jsonapi(client, "/api/v1/auth/logout", _refresh_document(raw_token))
+    invalid = _post_jsonapi(
+        client,
+        "/api/v1/auth/logout",
+        _refresh_document("not-a-jwt"),
+        accept_language="en",
+    )
+
+    assert first.status_code == second.status_code == 204
+    assert first.content == second.content == b""
+    assert "content-type" not in first.headers
+    assert invalid.status_code == 401
+    assert invalid.headers["content-type"] == JSONAPI_MEDIA_TYPE
+    assert invalid.json()["errors"][0]["code"] == "INVALID_TOKEN"
+    committed_session.expire_all()
+    assert committed_session.get(RefreshSession, resource["id"]).revoked_at is not None  # type: ignore[union-attr]
+    assert user.id is not None
+
+
+def test_logout_expired_token_commits_revocation_before_error(
+    client: TestClient,
+    committed_session: Session,
+    app: FastAPI,
+) -> None:
+    user = _persist_user(committed_session)
+    settings = cast(AuthSettings, app.state.auth_settings)
+    issued_at = datetime.now(UTC) - timedelta(days=31)
+    jti = uuid4()
+    raw_token = create_token(
+        user.id,
+        token_type="refresh",
+        settings=settings,
+        jti=jti,
+        now=issued_at,
+    )
+    committed_session.add(
+        RefreshSession(
+            id=jti,
+            user_id=user.id,
+            token_hash=hash_refresh_token(raw_token),
+            expires_at=issued_at + timedelta(seconds=settings.refresh_expires_seconds),
+        )
+    )
+    committed_session.commit()
+
+    response = _post_jsonapi(
+        client,
+        "/api/v1/auth/logout",
+        _refresh_document(raw_token),
+        accept_language="en",
+    )
+
+    assert response.status_code == 401
+    assert response.json()["errors"][0]["code"] == "TOKEN_EXPIRED"
+    committed_session.expire_all()
+    assert committed_session.get(RefreshSession, jti).revoked_at is not None  # type: ignore[union-attr]
+
+
+def test_logout_openapi_documents_empty_204_and_jsonapi_errors(app: FastAPI) -> None:
+    responses = app.openapi()["paths"]["/api/v1/auth/logout"]["post"]["responses"]
+
+    assert "content" not in responses["204"]
+    for status_code in ("401", "406", "415", "422", "500"):
+        assert set(responses[status_code]["content"]) == {JSONAPI_MEDIA_TYPE}

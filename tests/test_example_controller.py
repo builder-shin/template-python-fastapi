@@ -90,6 +90,8 @@ def test_application_exposes_only_explicitly_composed_routes(app: FastAPI) -> No
         "/api/schema",
         "/api-docs",
         "/api/v1/auth/login",
+        "/api/v1/auth/logout",
+        "/api/v1/auth/refresh",
         "/api/v1/auth/register",
         "/api/v1/examples",
         "/api/v1/examples/{resource_id}",
