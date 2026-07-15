@@ -20,3 +20,4 @@ node_modules/
 .claude/
 .jwshin/
 docs/
+.worktrees/
