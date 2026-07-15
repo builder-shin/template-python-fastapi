@@ -85,6 +85,14 @@ class JsonApiSerializer[ModelT]:
     relationships: ClassVar[Mapping[str, RelationshipDefinition]] = MappingProxyType({})
 
     @classmethod
+    def resource_location(cls, model: ModelT) -> str | None:
+        """Return the canonical self location for one resource, when available."""
+
+        if cls.resource_path is None:
+            return None
+        return f"{cls.resource_path}/{cls._resource_key(model)[1]}"
+
+    @classmethod
     def serialize(cls, model: ModelT, include: Sequence[str] = ()) -> ResourceObject:
         """Serialize one primary resource and validate any requested include path."""
 
@@ -285,6 +293,7 @@ class JsonApiSerializer[ModelT]:
     @classmethod
     def _build_resource(cls, model: Any) -> tuple[ResourceObject, dict[str, tuple[Any, ...]]]:
         identifier = cls._identifier(model)
+        resource_location = cls.resource_location(model)
         attributes: dict[str, JsonValue] = {}
         for internal_name in cls.attributes:
             public_name = _snake_to_camel(internal_name)
@@ -312,19 +321,19 @@ class JsonApiSerializer[ModelT]:
             else:
                 linkage = None
 
-            if cls.resource_path is None:
+            if resource_location is None:
                 relationships[public_name] = RelationshipObject(data=linkage)
             else:
                 relationships[public_name] = RelationshipObject(
                     data=linkage,
                     links={
-                        "self": f"{cls.resource_path}/{identifier.id}/relationships/{public_name}",
-                        "related": f"{cls.resource_path}/{identifier.id}/{public_name}",
+                        "self": f"{resource_location}/relationships/{public_name}",
+                        "related": f"{resource_location}/{public_name}",
                     },
                 )
 
-        if relationships and cls.resource_path is not None:
-            links: Links = {"self": f"{cls.resource_path}/{identifier.id}"}
+        if relationships and resource_location is not None:
+            links: Links = {"self": resource_location}
             return (
                 ResourceObject(
                     type=identifier.type,
@@ -345,8 +354,8 @@ class JsonApiSerializer[ModelT]:
                 ),
                 relationship_models,
             )
-        if cls.resource_path is not None:
-            links = {"self": f"{cls.resource_path}/{identifier.id}"}
+        if resource_location is not None:
+            links = {"self": resource_location}
             return (
                 ResourceObject(
                     type=identifier.type,

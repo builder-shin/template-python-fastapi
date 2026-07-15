@@ -1,5 +1,6 @@
 """Validated API input schemas."""
 
+from app.schemas.auth import LoginDocument, RefreshTokenDocument, RegisterDocument, normalize_email
 from app.schemas.example import (
     EXAMPLE_QUERY_POLICY,
     ExampleCreate,
@@ -14,4 +15,8 @@ __all__ = [
     "ExampleRelationships",
     "ExampleReplace",
     "ExampleUpdate",
+    "LoginDocument",
+    "RefreshTokenDocument",
+    "RegisterDocument",
+    "normalize_email",
 ]

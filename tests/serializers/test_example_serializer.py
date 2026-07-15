@@ -126,6 +126,27 @@ def test_example_serializer_exposes_only_declared_attributes(example: Example) -
     assert resource.links == {"self": f"/api/v1/examples/{UUID(int=1)}"}
 
 
+def test_default_resource_location_preserves_example_link_contract(example: Example) -> None:
+    assert ExampleSerializer.resource_location(example) == f"/api/v1/examples/{UUID(int=1)}"
+
+
+def test_overridden_resource_location_drives_resource_and_relationship_links() -> None:
+    class _CurrentParentSerializer(_OneParentSerializer):
+        @classmethod
+        def resource_location(cls, model: _Parent) -> str:
+            return "/parents/current"
+
+    parent = _Parent(id=UUID(int=1), child=_Child(id=UUID(int=2)))
+
+    resource = _CurrentParentSerializer.serialize(parent)
+
+    assert resource.links == {"self": "/parents/current"}
+    assert resource.relationships["child"].links == {
+        "self": "/parents/current/relationships/child",
+        "related": "/parents/current/child",
+    }
+
+
 def test_example_serializer_emits_linkage_and_relationship_links(example: Example) -> None:
     resource = ExampleSerializer.serialize(example)
     category = resource.relationships["category"]

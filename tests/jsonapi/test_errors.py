@@ -26,6 +26,13 @@ from app.jsonapi.localization import localize_error, resolve_language
 from config.main import create_app
 
 EXPECTED_ERROR_CODES = {
+    "AUTHENTICATION_REQUIRED",
+    "EMAIL_ALREADY_REGISTERED",
+    "INVALID_CREDENTIALS",
+    "INVALID_TOKEN",
+    "TOKEN_EXPIRED",
+    "TOKEN_REVOKED",
+    "USER_INACTIVE",
     "NOT_ACCEPTABLE",
     "UNSUPPORTED_MEDIA_TYPE",
     "INVALID_JSONAPI_DOCUMENT",

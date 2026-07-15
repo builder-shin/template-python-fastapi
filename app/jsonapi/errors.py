@@ -27,6 +27,13 @@ type ErrorCode = Literal[
     "VALIDATION_ERROR",
     "INTERNAL_SERVER_ERROR",
     "HTTP_ERROR",
+    "AUTHENTICATION_REQUIRED",
+    "INVALID_CREDENTIALS",
+    "INVALID_TOKEN",
+    "TOKEN_EXPIRED",
+    "TOKEN_REVOKED",
+    "USER_INACTIVE",
+    "EMAIL_ALREADY_REGISTERED",
 ]
 
 
@@ -54,10 +61,45 @@ ERROR_CODES: tuple[ErrorCode, ...] = (
     "VALIDATION_ERROR",
     "INTERNAL_SERVER_ERROR",
     "HTTP_ERROR",
+    "AUTHENTICATION_REQUIRED",
+    "INVALID_CREDENTIALS",
+    "INVALID_TOKEN",
+    "TOKEN_EXPIRED",
+    "TOKEN_REVOKED",
+    "USER_INACTIVE",
+    "EMAIL_ALREADY_REGISTERED",
 )
 
 ERROR_CATALOG: dict[Language, dict[ErrorCode, ErrorMessage]] = {
     "ko": {
+        "AUTHENTICATION_REQUIRED": ErrorMessage(
+            title="인증 필요",
+            detail="이 요청에는 인증이 필요합니다.",
+        ),
+        "EMAIL_ALREADY_REGISTERED": ErrorMessage(
+            title="이미 등록된 이메일",
+            detail="이미 등록된 이메일입니다.",
+        ),
+        "INVALID_CREDENTIALS": ErrorMessage(
+            title="잘못된 인증 정보",
+            detail="이메일 또는 비밀번호가 올바르지 않습니다.",
+        ),
+        "INVALID_TOKEN": ErrorMessage(
+            title="유효하지 않은 토큰",
+            detail="인증 토큰이 유효하지 않습니다.",
+        ),
+        "TOKEN_EXPIRED": ErrorMessage(
+            title="만료된 토큰",
+            detail="인증 토큰이 만료되었습니다.",
+        ),
+        "TOKEN_REVOKED": ErrorMessage(
+            title="폐기된 토큰",
+            detail="인증 토큰이 폐기되었습니다.",
+        ),
+        "USER_INACTIVE": ErrorMessage(
+            title="비활성 사용자",
+            detail="사용자 계정이 비활성 상태입니다.",
+        ),
         "NOT_ACCEPTABLE": ErrorMessage(
             title="허용할 수 없는 응답 형식",
             detail="요청한 응답 형식을 지원하지 않습니다.",
@@ -128,6 +170,34 @@ ERROR_CATALOG: dict[Language, dict[ErrorCode, ErrorMessage]] = {
         ),
     },
     "en": {
+        "AUTHENTICATION_REQUIRED": ErrorMessage(
+            title="Authentication required",
+            detail="Authentication is required for this request.",
+        ),
+        "EMAIL_ALREADY_REGISTERED": ErrorMessage(
+            title="Email already registered",
+            detail="The email address is already registered.",
+        ),
+        "INVALID_CREDENTIALS": ErrorMessage(
+            title="Invalid credentials",
+            detail="The email or password is incorrect.",
+        ),
+        "INVALID_TOKEN": ErrorMessage(
+            title="Invalid token",
+            detail="The authentication token is invalid.",
+        ),
+        "TOKEN_EXPIRED": ErrorMessage(
+            title="Token expired",
+            detail="The authentication token has expired.",
+        ),
+        "TOKEN_REVOKED": ErrorMessage(
+            title="Token revoked",
+            detail="The authentication token has been revoked.",
+        ),
+        "USER_INACTIVE": ErrorMessage(
+            title="User inactive",
+            detail="The user account is inactive.",
+        ),
         "NOT_ACCEPTABLE": ErrorMessage(
             title="Not acceptable",
             detail="The requested response format is not supported.",

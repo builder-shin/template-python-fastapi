@@ -38,6 +38,18 @@ class TokenClaims:
     aud: str
 
 
+@dataclass(frozen=True, slots=True)
+class AuthTokenResource:
+    """Public access and refresh token pair returned after authentication."""
+
+    id: UUID
+    access_token: str
+    refresh_token: str
+    token_type: Literal["Bearer"]
+    expires_in: int
+    refresh_expires_in: int
+
+
 def create_token(
     subject: str | UUID,
     *,
