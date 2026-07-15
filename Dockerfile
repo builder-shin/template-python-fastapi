@@ -30,6 +30,6 @@ COPY --from=builder --chown=app:app /app /app
 USER app
 EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD ["python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:4000/api/schema', timeout=3).close()"]
+  CMD ["python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:4000/health/ready', timeout=3).close()"]
 
 CMD ["uvicorn", "config.asgi:application", "--host", "0.0.0.0", "--port", "4000"]

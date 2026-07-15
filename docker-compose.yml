@@ -16,6 +16,17 @@ services:
       retries: 10
       start_period: 5s
 
+  redis:
+    image: redis:8-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
   migrate:
     build: .
     command: ["alembic", "upgrade", "head"]
@@ -36,11 +47,36 @@ services:
       DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
       DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-development-only-jwt-secret-key-at-least-32-bytes} # pragma: allowlist secret
+      JWT_ISSUER: ${JWT_ISSUER:-template-python-fastapi}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-template-python-fastapi}
+      JWT_ACCESS_EXPIRES_SECONDS: ${JWT_ACCESS_EXPIRES_SECONDS:-900}
+      JWT_REFRESH_EXPIRES_SECONDS: ${JWT_REFRESH_EXPIRES_SECONDS:-2592000}
+      JWT_LEEWAY_SECONDS: ${JWT_LEEWAY_SECONDS:-0}
+      REDIS_URL: ${COMPOSE_REDIS_URL:-redis://redis:6379/0}
     depends_on:
       migrate:
         condition: service_completed_successfully
     ports:
       - "4000:4000"
 
+  worker:
+    build: .
+    command: ["dramatiq", "app.jobs"]
+    healthcheck:
+      disable: true
+    environment:
+      DATABASE_URL: ${COMPOSE_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-fastapi}:${POSTGRES_PASSWORD:-fastapi}@db:5432/${POSTGRES_DB:-fastapi_template}} # pragma: allowlist secret
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+      REDIS_URL: ${COMPOSE_REDIS_URL:-redis://redis:6379/0}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
+  redis_data:
