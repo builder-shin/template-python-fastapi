@@ -48,6 +48,7 @@ def test_compose_defines_database_redis_migration_api_and_worker() -> None:
     }
     assert worker["environment"]["DATABASE_URL"].startswith("postgresql+psycopg://")
     assert worker["environment"]["REDIS_URL"] == "redis://redis:6379/0"
+    assert worker["environment"]["REFRESH_SESSION_RETENTION_SECONDS"] == "604800"
 
 
 def test_api_receives_auth_and_broker_settings_without_redis_dependency() -> None:
@@ -63,6 +64,7 @@ def test_api_receives_auth_and_broker_settings_without_redis_dependency() -> Non
     assert api["environment"]["JWT_ACCESS_EXPIRES_SECONDS"] == "900"
     assert api["environment"]["JWT_REFRESH_EXPIRES_SECONDS"] == "2592000"
     assert api["environment"]["JWT_LEEWAY_SECONDS"] == "0"
+    assert "REFRESH_SESSION_RETENTION_SECONDS" not in api["environment"]
 
 
 def test_host_redis_url_does_not_override_the_compose_network_endpoint() -> None:
@@ -89,6 +91,7 @@ def test_example_environment_labels_a_long_development_only_secret() -> None:
     assert values["JWT_REFRESH_EXPIRES_SECONDS"] == "2592000"
     assert values["JWT_LEEWAY_SECONDS"] == "0"
     assert values["REDIS_URL"] == "redis://localhost:6379/0"
+    assert values["REFRESH_SESSION_RETENTION_SECONDS"] == "604800"
 
 
 def test_runtime_healthcheck_uses_database_readiness_endpoint() -> None:

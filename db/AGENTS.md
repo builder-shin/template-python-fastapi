@@ -2,7 +2,7 @@
 
 ## 결정적 시드
 
-- `seed(session)`은 호출자가 소유한 transaction 안에서만 데이터를 변경하며, commit하지 않는다. 명령행 진입점은 `SessionFactory.begin()`으로 transaction을 연다.
+- `seed(session)`은 호출자가 소유한 transaction 안에서만 데이터를 변경하며, commit하지 않는다. 명령행 진입점은 `get_session_factory().begin()`으로 transaction을 연다.
 - CLI 시드는 `uv run python -m db.seeds`로 명시 실행한다. `create_app`, ASGI import, Docker 서비스 시작 경로에서 자동으로 호출하지 않는다.
 - 고정 UUID 행은 PostgreSQL upsert로 맞춘다. 값이 달라질 때만 `is_distinct_from` 조건으로 갱신해 재실행 시 timestamp가 불필요하게 변하지 않게 한다.
 - `SEED_CATEGORY_ID`, `SEED_TAG_ID`, `SEED_EXAMPLE_ID`는 기존 개발·계약 테스트 데이터의 stable identifier다. 같은 목적의 행을 임의 UUID로 중복 생성하지 않는다.

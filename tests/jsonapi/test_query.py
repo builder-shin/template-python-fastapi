@@ -2,29 +2,53 @@
 
 from __future__ import annotations
 
+import json
+from base64 import urlsafe_b64encode
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    Integer,
+    LargeBinary,
+    Numeric,
+    String,
+    TypeDecorator,
+    func,
+    select,
+)
+from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.orm import Session
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from starlette.datastructures import QueryParams
 
-from app.jsonapi import JsonApiException, SuccessDocument
+from app.jsonapi import JsonApiException, LinkObject, SuccessDocument
 from app.jsonapi.query import (
     FilterClause,
     FilterField,
+    PageCursor,
     PageSpec,
     QueryPolicy,
     QuerySpec,
     SortTerm,
     apply_filters,
+    apply_keyset,
     apply_pagination,
     apply_sort,
     build_pagination_links,
+    decode_cursor,
+    encode_cursor,
+    keyset_sorts,
+    parse_page_query,
     parse_query,
 )
 from app.models import Example, ExampleStatus
@@ -296,7 +320,7 @@ def test_reject_page_integer_overflow_without_leaking_python_errors(
     raw_value: str,
 ) -> None:
     with pytest.raises(JsonApiException) as captured:
-        parse_query(QueryParams(((parameter, raw_value),)), example_query_policy)
+        parse_query(QueryParams([(parameter, raw_value)]), example_query_policy)
 
     assert captured.value.code == "INVALID_PAGE"
     assert captured.value.source_parameter == parameter
@@ -354,7 +378,7 @@ def test_filter_name_injection_is_rejected_but_value_is_kept_as_data(
     injection_value = "x' OR 1=1 --"
     spec = parse_query(QueryParams(f"filter[title]={injection_value}"), example_query_policy)
     statement = apply_filters(select(Example), spec.filters, example_query_policy)
-    compiled = statement.compile(dialect=postgresql.dialect())
+    compiled = statement.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
 
     assert injection_value not in str(compiled)
     assert injection_value in compiled.params.values()
@@ -453,7 +477,7 @@ def test_apply_filters_executes_all_operators_with_literal_user_values(
 def test_contains_escapes_sql_wildcards_as_literal_substrings(example_query_policy: QueryPolicy) -> None:
     spec = parse_query(QueryParams("filter[title][contains]=%_"), example_query_policy)
     statement = apply_filters(select(Example), spec.filters, example_query_policy)
-    compiled = statement.compile(dialect=postgresql.dialect())
+    compiled = statement.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
 
     assert "ESCAPE" in str(compiled)
     assert any(value == "/%/_" for value in compiled.params.values())
@@ -482,6 +506,10 @@ def test_count_remains_available_before_stable_pagination(
     assert paginated_statement is not sorted_statement
     assert filtered_statement._limit_clause is None
     assert len(sorted_statement._order_by_clauses) == 2
+    # The probe row is what replaces the count when deciding whether a next page exists.
+    first_page = PageSpec(number=1, size=1)
+    assert len(list(db_session.scalars(apply_pagination(sorted_statement, first_page)))) == 1
+    assert len(list(db_session.scalars(apply_pagination(sorted_statement, first_page, probe=True)))) == 2
 
 
 @pytest.mark.parametrize(
@@ -522,7 +550,9 @@ def test_apply_sort_does_not_duplicate_tie_breaker_by_name_or_column(
     assert len(explicit_column._order_by_clauses) == 1
 
 
-def _page_number(link: str) -> int:
+def _page_number(link: str | LinkObject | None) -> int:
+    # build_pagination_links always yields plain URL strings; Links widens the declared type.
+    assert isinstance(link, str)
     query = dict(parse_qsl(urlsplit(link).query, keep_blank_values=True))
     return int(query["page[number]"])
 
@@ -549,7 +579,7 @@ def test_pagination_links_preserve_non_page_multi_items_and_encode_brackets() ->
     assert _page_number(links["last"]) == 3
 
     for link in (links["self"], links["first"], links["prev"], links["next"], links["last"]):
-        assert link is not None
+        assert isinstance(link, str)
         parsed = urlsplit(link)
         items = parse_qsl(parsed.query, keep_blank_values=True)
         assert parsed.scheme == ""
@@ -601,3 +631,471 @@ def test_pagination_links_are_accepted_by_success_document_without_cast() -> Non
 
     assert document.links == links
     assert document.links["prev"] is None
+
+
+def test_parse_page_query_defaults_and_clamps() -> None:
+    assert parse_page_query(QueryParams()) == PageSpec(number=1, size=20)
+    assert parse_page_query(QueryParams("page[number]=3&page[size]=1000")) == PageSpec(number=3, size=100)
+
+
+@pytest.mark.parametrize(
+    ("query", "code", "source_parameter"),
+    [
+        ("sort=title", "INVALID_SORT", "sort"),
+        ("filter[score]=1", "INVALID_FILTER", "filter[score]"),
+        ("include=category", "INVALID_INCLUDE", "include"),
+        ("fields[examples]=title", "INVALID_QUERY_PARAMETER", "fields[examples]"),
+        ("unknown=value", "INVALID_QUERY_PARAMETER", "unknown"),
+        ("page=1", "INVALID_PAGE", "page"),
+        ("page[cursor]=one", "INVALID_PAGE", "page[cursor]"),
+        ("page[size]=abc", "INVALID_PAGE", "page[size]"),
+        ("page[size]=0", "INVALID_PAGE", "page[size]"),
+        ("page[size]=1&page[size]=2", "INVALID_PAGE", "page[size]"),
+        ("page[number]=9223372036854775807&page[size]=100", "INVALID_PAGE", "page[number]"),
+    ],
+)
+def test_parse_page_query_rejects_non_page_parameters(
+    query: str,
+    code: str,
+    source_parameter: str,
+) -> None:
+    with pytest.raises(JsonApiException) as captured:
+        parse_page_query(QueryParams(query))
+
+    assert captured.value.status_code == 400
+    assert captured.value.code == code
+    assert captured.value.source_parameter == source_parameter
+
+
+def _page_query(link: str) -> dict[str, str]:
+    return dict(parse_qsl(urlsplit(link).query, keep_blank_values=True))
+
+
+def test_pagination_links_null_last_without_totals() -> None:
+    without_more = build_pagination_links(
+        "https://api.example.com/examples",
+        QueryParams("page[number]=2&page[size]=2"),
+        PageSpec(number=2, size=2),
+        total=None,
+        has_more=False,
+    )
+    with_more = build_pagination_links(
+        "https://api.example.com/examples",
+        QueryParams("page[number]=2&page[size]=2"),
+        PageSpec(number=2, size=2),
+        total=None,
+        has_more=True,
+    )
+
+    assert without_more["last"] is None
+    assert without_more["next"] is None
+    assert _page_number(without_more["prev"]) == 1
+    assert with_more["last"] is None
+    assert _page_number(with_more["next"]) == 3
+    assert "page[totals]" not in _page_query(str(with_more["self"]))
+
+
+def test_pagination_links_preserve_the_totals_opt_in() -> None:
+    links = build_pagination_links(
+        "https://api.example.com/examples",
+        QueryParams("page[totals]=true&page[size]=2"),
+        PageSpec(number=1, size=2, totals=True),
+        total=5,
+    )
+
+    assert _page_number(links["last"]) == 3
+    for link in links.values():
+        assert link is None or _page_query(str(link))["page[totals]"] == "true"
+
+
+def test_pagination_links_never_contradict_a_paid_for_count() -> None:
+    """A page that saw no probe row must still follow the COUNT when one was paid for.
+
+    ``index`` reads the probe on raw rows and may fold some away afterwards, so a false
+    ``has_more`` is possible. Letting it win alone would emit ``next: null`` next to a
+    ``last`` several pages further on — a document that contradicts itself.
+    """
+
+    links = build_pagination_links(
+        "https://api.example.com/examples",
+        QueryParams("page[totals]=true&page[size]=5"),
+        PageSpec(number=1, size=5, totals=True),
+        total=90,
+        has_more=False,
+    )
+
+    assert _page_number(links["last"]) == 18
+    assert _page_number(links["next"]) == 2
+
+
+def test_pagination_links_trust_the_probe_past_the_last_counted_page() -> None:
+    """The COUNT must not silence a probe row: rows added after it still need a ``next``."""
+
+    links = build_pagination_links(
+        "https://api.example.com/examples",
+        QueryParams("page[totals]=true&page[size]=5"),
+        PageSpec(number=2, size=5, totals=True),
+        total=10,
+        has_more=True,
+    )
+
+    assert _page_number(links["last"]) == 2
+    assert _page_number(links["next"]) == 3
+
+
+def test_cursor_links_carry_after_and_before_parameters() -> None:
+    cursor = PageCursor(raw="Y3Vyc29y", before=False, values=(1,))
+    links = build_pagination_links(
+        "https://api.example.com/examples",
+        QueryParams("page[after]=Y3Vyc29y&page[size]=2"),
+        PageSpec(size=2, cursor=cursor),
+        total=None,
+        has_more=True,
+        next_cursor="bmV4dA",
+        prev_cursor="cHJldg",
+    )
+
+    assert _page_query(str(links["self"]))["page[after]"] == "Y3Vyc29y"
+    assert _page_query(str(links["first"]))["page[after]"] == ""
+    assert _page_query(str(links["last"]))["page[before]"] == ""
+    assert _page_query(str(links["next"]))["page[after]"] == "bmV4dA"
+    assert _page_query(str(links["prev"]))["page[before]"] == "cHJldg"
+    assert all("%5B" in str(link) and "%5D" in str(link) for link in links.values())
+    assert all("page[number]" not in _page_query(str(link)) for link in links.values())
+
+
+def test_boundary_cursor_links_omit_the_unreachable_direction() -> None:
+    start = build_pagination_links(
+        "https://api.example.com/examples",
+        QueryParams("page[after]=&page[size]=2"),
+        PageSpec(size=2, cursor=PageCursor()),
+        total=None,
+        has_more=True,
+        next_cursor="bmV4dA",
+        prev_cursor="cHJldg",
+    )
+    end = build_pagination_links(
+        "https://api.example.com/examples",
+        QueryParams("page[before]=&page[size]=2"),
+        PageSpec(size=2, cursor=PageCursor(before=True)),
+        total=None,
+        has_more=True,
+        next_cursor="bmV4dA",
+        prev_cursor="cHJldg",
+    )
+
+    assert start["prev"] is None
+    assert start["next"] is not None
+    assert end["next"] is None
+    assert end["prev"] is not None
+
+
+def test_page_totals_and_cursor_parameters_parse_into_page_spec(
+    example_query_policy: QueryPolicy,
+) -> None:
+    default_spec = parse_query(QueryParams(""), example_query_policy)
+    totals_spec = parse_query(QueryParams("page[totals]=true"), example_query_policy)
+    disabled_spec = parse_query(QueryParams("page[totals]=false"), example_query_policy)
+    after_spec = parse_query(QueryParams("page[after]="), example_query_policy)
+    before_spec = parse_query(QueryParams("page[before]="), example_query_policy)
+
+    assert default_spec.page.totals is False
+    assert default_spec.page.cursor is None
+    assert totals_spec.page.totals is True
+    assert disabled_spec.page.totals is False
+    assert after_spec.page.cursor == PageCursor(before=False)
+    assert before_spec.page.cursor == PageCursor(before=True)
+
+
+@pytest.mark.parametrize(
+    ("query", "parameter"),
+    [
+        ("page[totals]=1", "page[totals]"),
+        ("page[totals]=true&page[totals]=true", "page[totals]"),
+        ("page[after]=&page[after]=", "page[after]"),
+        ("page[after]=&page[before]=", "page[before]"),
+        ("page[after]=&page[number]=3", "page[number]"),
+        ("page[after]=not-base64!", "page[after]"),
+        ("page[before]=e30", "page[before]"),
+    ],
+)
+def test_reject_unauthorized_page_totals_and_cursors(
+    example_query_policy: QueryPolicy,
+    query: str,
+    parameter: str,
+) -> None:
+    with pytest.raises(JsonApiException) as captured:
+        parse_query(QueryParams(query), example_query_policy)
+
+    assert captured.value.code == "INVALID_PAGE"
+    assert captured.value.source_parameter == parameter
+
+
+def test_cursor_is_rejected_for_a_nullable_sort_column(example_query_policy: QueryPolicy) -> None:
+    """A keyset predicate cannot address NULL-ordered rows, so the sort must be NOT NULL."""
+
+    nullable_policy = QueryPolicy(
+        filters=example_query_policy.filters,
+        sorts={**example_query_policy.sorts, "description": Example.description},
+        includes=example_query_policy.includes,
+        default_sort=example_query_policy.default_sort,
+        tie_breaker=example_query_policy.tie_breaker,
+    )
+
+    assert parse_query(QueryParams("sort=description"), nullable_policy).page.cursor is None
+
+    with pytest.raises(JsonApiException) as captured:
+        parse_query(QueryParams("sort=description&page[after]="), nullable_policy)
+
+    assert captured.value.code == "INVALID_PAGE"
+    assert captured.value.source_parameter == "page[after]"
+
+
+def _keyset_page(
+    session: Session,
+    query: str,
+    policy: QueryPolicy,
+) -> list[Example]:
+    spec = parse_query(QueryParams(query), policy)
+    cursor = spec.page.cursor
+    assert cursor is not None
+    statement = apply_sort(
+        apply_keyset(select(Example), spec.sorts, policy, cursor),
+        keyset_sorts(spec.sorts, cursor),
+        policy,
+    )
+    models = list(session.scalars(apply_pagination(statement, spec.page)))
+    if cursor.before:
+        models.reverse()
+    return models
+
+
+@pytest.mark.parametrize("sort_query", ["", "sort=-score", "sort=title", "sort=createdAt,score"])
+def test_cursor_round_trip_matches_the_equivalent_offset_page(
+    db_session: Session,
+    stored_query_examples: tuple[Example, ...],
+    example_query_policy: QueryPolicy,
+    sort_query: str,
+) -> None:
+    del stored_query_examples
+    prefix = f"{sort_query}&" if sort_query else ""
+    offset_spec = parse_query(QueryParams(f"{prefix}page[size]=2"), example_query_policy)
+    sorted_statement = apply_sort(select(Example), offset_spec.sorts, example_query_policy)
+    first_page = list(db_session.scalars(apply_pagination(sorted_statement, offset_spec.page)))
+    second_page = list(db_session.scalars(apply_pagination(sorted_statement, PageSpec(number=2, size=2))))
+
+    forward_cursor = encode_cursor(first_page[-1], offset_spec.sorts, example_query_policy)
+    backward_cursor = encode_cursor(second_page[0], offset_spec.sorts, example_query_policy)
+    assert forward_cursor is not None
+    assert backward_cursor is not None
+
+    forward = _keyset_page(
+        db_session,
+        f"{prefix}page[size]=2&page[after]={forward_cursor}",
+        example_query_policy,
+    )
+    backwards = _keyset_page(
+        db_session,
+        f"{prefix}page[size]=2&page[before]={backward_cursor}",
+        example_query_policy,
+    )
+    from_start = _keyset_page(db_session, f"{prefix}page[size]=2&page[after]=", example_query_policy)
+
+    assert [model.id for model in forward] == [model.id for model in second_page]
+    assert [model.id for model in backwards] == [model.id for model in first_page]
+    assert [model.id for model in from_start] == [model.id for model in first_page]
+
+
+class _CursorBase(DeclarativeBase):
+    """Declarative base used only to give the cursor codec real column types.
+
+    The table is never created: the codec reads ``column.type`` and the attribute value,
+    so a mapped class is enough to pin the supported type dispatch without touching the
+    application schema.
+    """
+
+
+class _Opaque(TypeDecorator[str]):
+    """A ``TypeDecorator`` that does not implement ``python_type``, as the base does not.
+
+    ``column.type.python_type`` raises ``NotImplementedError`` here rather than returning
+    a type the codec could reject on identity, so the gate has to survive the raise.
+    """
+
+    impl = String
+    cache_ok = True
+
+
+class CursorTypes(_CursorBase):
+    __tablename__ = "cursor_types"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    flag: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    ratio: Mapped[float] = mapped_column(Float, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    day: Mapped[date] = mapped_column(Date, nullable=False)
+    moment: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    label: Mapped[str] = mapped_column(String(10), nullable=False)
+    key: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    status: Mapped[ExampleStatus] = mapped_column(
+        SQLEnum(ExampleStatus, name="cursor_status", validate_strings=True),
+        nullable=False,
+    )
+    payload: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+    blob: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    opaque: Mapped[str] = mapped_column(_Opaque(10), nullable=False)
+
+
+_CURSOR_TYPE_VALUES: dict[str, object] = {
+    "id": 7,
+    "flag": True,
+    "ratio": 1.5,
+    "amount": Decimal("12.34"),
+    "day": date(2026, 8, 22),
+    "moment": datetime(2026, 8, 22, 12, 0, 0, 123456, tzinfo=UTC),
+    "label": "라벨",
+    "key": UUID(int=9),
+    "status": ExampleStatus.ACTIVE,
+}
+
+
+def _cursor_type_policy(name: str) -> QueryPolicy:
+    return QueryPolicy(
+        filters={},
+        sorts={name: getattr(CursorTypes, name)},
+        includes=frozenset(),
+        default_sort=(SortTerm(name),),
+        tie_breaker=SortTerm("id", column=CursorTypes.id),
+    )
+
+
+def _mint_cursor(signature: list[str], values: list[str]) -> str:
+    payload = json.dumps({"s": signature, "v": values}, separators=(",", ":"))
+    return urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+@pytest.mark.parametrize("name", [name for name in _CURSOR_TYPE_VALUES if name != "id"])
+def test_cursor_round_trips_every_supported_column_type(name: str) -> None:
+    policy = _cursor_type_policy(name)
+    sorts = (SortTerm(name), SortTerm("id"))
+    model = CursorTypes(**{name: _CURSOR_TYPE_VALUES[name], "id": _CURSOR_TYPE_VALUES["id"]})
+
+    raw_cursor = encode_cursor(model, sorts, policy)
+    assert raw_cursor is not None
+
+    cursor = decode_cursor(raw_cursor, sorts, policy, "page[after]")
+
+    assert cursor.values == (_CURSOR_TYPE_VALUES[name], _CURSOR_TYPE_VALUES["id"])
+    assert cursor.before is False
+
+
+@pytest.mark.parametrize("name", ["payload", "blob"])
+def test_cursor_refuses_column_types_it_cannot_represent(name: str) -> None:
+    policy = _cursor_type_policy(name)
+    sorts = (SortTerm(name), SortTerm("id"))
+    model = CursorTypes(**{name: b"x" if name == "blob" else {"a": "b"}, "id": 7})
+
+    assert encode_cursor(model, sorts, policy) is None
+
+    with pytest.raises(JsonApiException) as captured:
+        decode_cursor(_mint_cursor([name, "id"], ["x", "7"]), sorts, policy, "page[after]")
+
+    assert captured.value.code == "INVALID_PAGE"
+
+
+@pytest.mark.parametrize("name", ["payload", "blob", "opaque"])
+@pytest.mark.parametrize("parameter", ["page[after]", "page[before]"])
+def test_cursor_entry_point_is_refused_for_a_column_the_codec_cannot_represent(
+    name: str,
+    parameter: str,
+) -> None:
+    """The gate must consult the codec, not only nullability.
+
+    A NOT NULL column the codec cannot represent used to pass ``_keyset_columns``, so the
+    empty boundary cursor was admitted and the request served a dead-end first page:
+    ``encode_cursor`` returns ``None``, so ``next`` could never be minted, and any cursor
+    minted by hand for that sort is rejected at decode time. Both directions now fail
+    loudly at parse time instead.
+    """
+
+    policy = _cursor_type_policy(name)
+
+    assert parse_query(QueryParams(f"sort={name}"), policy).page.cursor is None
+
+    with pytest.raises(JsonApiException) as captured:
+        parse_query(QueryParams(f"sort={name}&{parameter}="), policy)
+
+    assert captured.value.code == "INVALID_PAGE"
+    assert captured.value.source_parameter == parameter
+
+
+@pytest.mark.parametrize("name", [name for name in _CURSOR_TYPE_VALUES if name != "id"])
+def test_cursor_entry_point_is_admitted_for_every_supported_column_type(name: str) -> None:
+    """The codec gate must not over-reject: identity dispatch has to cover every codec type."""
+
+    cursor = parse_query(QueryParams(f"sort={name}&page[after]="), _cursor_type_policy(name)).page.cursor
+
+    assert cursor is not None
+    assert cursor.values == ()
+
+
+def test_cursor_refuses_values_its_column_type_cannot_parse() -> None:
+    cases = [("flag", "yes"), ("ratio", "many"), ("amount", "much"), ("day", "yesterday"), ("id", "seven")]
+    for name, raw_value in cases:
+        policy = _cursor_type_policy(name if name != "id" else "label")
+        sorts = (SortTerm(name), SortTerm("id")) if name != "id" else (SortTerm("id"),)
+        values = [raw_value, "7"] if name != "id" else [raw_value]
+        signature = [name, "id"] if name != "id" else ["id"]
+
+        with pytest.raises(JsonApiException) as captured:
+            decode_cursor(_mint_cursor(signature, values), sorts, policy, "page[before]")
+
+        assert captured.value.code == "INVALID_PAGE"
+        assert captured.value.source_parameter == "page[before]"
+
+
+def test_cursor_is_not_minted_for_a_model_missing_its_sort_value() -> None:
+    policy = _cursor_type_policy("label")
+    sorts = (SortTerm("label"), SortTerm("id"))
+
+    assert encode_cursor(CursorTypes(id=7), sorts, policy) is None
+    assert encode_cursor(object(), sorts, policy) is None
+
+
+def _mint_payload(payload: object) -> str:
+    return urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("ascii").rstrip("=")
+
+
+@pytest.mark.parametrize(
+    "raw_cursor",
+    [
+        "A" * 5_000,
+        _mint_payload(["label", "id"]),
+        _mint_payload({"s": ["label", "id"], "v": "not-a-list"}),
+        _mint_payload({"s": ["label", "id"], "v": ["only-one"]}),
+        _mint_payload({"s": ["label", "id"], "v": [7, "7"]}),
+        _mint_payload({"s": "label,id", "v": ["a", "7"]}),
+    ],
+)
+def test_cursor_refuses_payloads_that_do_not_match_the_effective_sort(raw_cursor: str) -> None:
+    policy = _cursor_type_policy("label")
+    sorts = (SortTerm("label"), SortTerm("id"))
+
+    with pytest.raises(JsonApiException) as captured:
+        decode_cursor(raw_cursor, sorts, policy, "page[after]")
+
+    assert captured.value.code == "INVALID_PAGE"
+    assert captured.value.source_parameter == "page[after]"
+
+
+def test_cursor_is_not_minted_for_a_sort_no_keyset_can_address(example_query_policy: QueryPolicy) -> None:
+    nullable_policy = QueryPolicy(
+        filters=example_query_policy.filters,
+        sorts={"description": Example.description},
+        includes=example_query_policy.includes,
+        default_sort=(SortTerm("description"),),
+        tie_breaker=example_query_policy.tie_breaker,
+    )
+    sorts = (SortTerm("description"), SortTerm("id"))
+
+    assert encode_cursor(Example(description="설명"), sorts, nullable_policy) is None

@@ -30,10 +30,13 @@ dev = [
     "detect-secrets>=1.5",
     "httpx>=0.28",
     "mypy>=1.13",
+    "poethepoet>=0.48.0",
     "pre-commit>=4.0",
     "pytest>=8.3",
     "pytest-cov>=6.0",
+    "pyyaml>=6.0.3",
     "ruff>=0.8",
+    "types-pyyaml>=6.0.12.20260815",
 ]
 
 [tool.ruff]
@@ -49,7 +52,33 @@ ignore = ["E501"]
 python_version = "3.12"
 strict = true
 ignore_missing_imports = true
-exclude = [".venv/", "tests/"]
+exclude = [".venv/"]
+# `db/` is a namespace package (no `__init__.py`, so `python -m db.seeds` and the
+# hatch wheel packages keep working). Without an explicit base, mypy resolves
+# `db/seeds.py` as both `seeds` and `db.seeds` once tests/ is checked and aborts.
+explicit_package_bases = true
+mypy_path = "."
+
+[tool.poe.tasks]
+lint = "ruff check ."
+format = "ruff format ."
+format-check = "ruff format --check ."
+typecheck = "mypy ."
+test = "pytest"
+test-jsonapi = "pytest --no-cov tests/jsonapi -q"
+test-controllers = "pytest --no-cov tests/controllers -q"
+test-db = "pytest --no-cov tests/config tests/integration tests/test_database_fixtures.py -q"
+migrate = "alembic upgrade head"
+seed = "python -m db.seeds"
+# Plain string commands, not `shell = ...`: poe's default shell interpreter is
+# POSIX, so a shell task would need Git Bash or WSL on Windows. None of these
+# three uses a pipe, redirect or `&&`, so they run docker directly everywhere.
+db-up = "docker compose up -d --wait db"
+worker = "docker compose up -d --wait worker"
+compose-verify = "docker compose config --quiet"
+# The full gate stays in scripts/check.sh so CI and local runs cannot diverge.
+# It provisions a throwaway Docker PostgreSQL, so it still needs bash (Git Bash or WSL on Windows).
+check = { shell = "./scripts/check.sh" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

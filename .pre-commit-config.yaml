@@ -10,3 +10,14 @@ repos:
     hooks:
       - id: detect-secrets
         args: ["--baseline", ".secrets.baseline"]
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        # The project virtualenv owns the SQLAlchemy and Pydantic plugins and stubs,
+        # so mirrors-mypy's isolated environment would report a different error set
+        # than scripts/check.sh.
+        entry: uv run mypy .
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false

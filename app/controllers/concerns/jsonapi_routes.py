@@ -7,24 +7,20 @@ from typing import Any
 
 from fastapi import Request
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, create_model
+from pydantic import BaseModel, create_model
 from pydantic.experimental.missing_sentinel import MISSING
 from starlette.responses import Response
 
 from app.jsonapi import ResourceIdentifier, validate_content_type
+from app.jsonapi.naming import WRITE_MODEL_CONFIG
 
 
-def _snake_to_camel(value: str) -> str:
-    head, *tail = value.split("_")
-    return head + "".join(segment[:1].upper() + segment[1:] for segment in tail)
+def validate_route_prefix(prefix: str) -> str:
+    """Return a router prefix that starts with ``/`` and does not end with one."""
 
-
-_WRITE_MODEL_CONFIG = ConfigDict(
-    alias_generator=_snake_to_camel,
-    extra="forbid",
-    populate_by_name=True,
-    strict=True,
-)
+    if not prefix.startswith("/") or prefix.endswith("/"):
+        raise ValueError("route prefix must start with '/' and must not end with '/'")
+    return prefix
 
 
 class JsonApiRoute(APIRoute):
@@ -62,12 +58,12 @@ def write_document_model(
 
     resource_model = create_model(
         f"{name}Resource",
-        __config__=_WRITE_MODEL_CONFIG,
+        __config__=WRITE_MODEL_CONFIG,
         **resource_fields,
     )
     return create_model(
         f"{name}Document",
-        __config__=_WRITE_MODEL_CONFIG,
+        __config__=WRITE_MODEL_CONFIG,
         data=(resource_model, ...),
     )
 
@@ -78,6 +74,6 @@ def relationship_document_model(*, name: str, many: bool) -> type[BaseModel]:
     data_type: Any = list[ResourceIdentifier] if many else ResourceIdentifier | None
     return create_model(
         f"{name}Document",
-        __config__=_WRITE_MODEL_CONFIG,
+        __config__=WRITE_MODEL_CONFIG,
         data=(data_type, ...),
     )

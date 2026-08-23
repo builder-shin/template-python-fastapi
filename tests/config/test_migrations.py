@@ -37,7 +37,7 @@ def test_alembic_uses_database_url_without_test_override(test_database_url: str)
 
     _run_alembic(environment, "downgrade", "base")
     _run_alembic(environment, "upgrade", "head")
-    assert "20260715_0002 (head)" in _run_alembic(environment, "current")
+    assert "20260822_0004 (head)" in _run_alembic(environment, "current")
     assert "No new upgrade operations detected" in _run_alembic(environment, "check")
 
 
@@ -46,7 +46,7 @@ def test_alembic_prefers_test_database_url(test_database_url: str) -> None:
     environment["TEST_DATABASE_URL"] = test_database_url
     environment["DATABASE_URL"] = "postgresql+psycopg://127.0.0.1:1/ignored"
 
-    assert "20260715_0002 (head)" in _run_alembic(environment, "current")
+    assert "20260822_0004 (head)" in _run_alembic(environment, "current")
 
 
 def test_alembic_falls_back_to_explicit_config_url(
@@ -63,7 +63,7 @@ def test_alembic_falls_back_to_explicit_config_url(
     engine = create_engine(test_database_url)
     try:
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260715_0002"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "20260822_0004"
     finally:
         engine.dispose()
 

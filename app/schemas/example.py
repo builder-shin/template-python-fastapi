@@ -6,71 +6,65 @@ from datetime import datetime
 from typing import Annotated, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
+from pydantic import Field, model_validator
 from pydantic.experimental.missing_sentinel import MISSING
 
 from app.jsonapi.documents import ResourceIdentifier
+from app.jsonapi.naming import JsonApiWriteSchema
 from app.jsonapi.query import FilterField, QueryPolicy, SortTerm
 from app.models import Example, ExampleStatus
 
-
-def _snake_to_camel(value: str) -> str:
-    head, *tail = value.split("_")
-    return head + "".join(segment[:1].upper() + segment[1:] for segment in tail)
-
-
-class _WriteSchema(BaseModel):
-    model_config = ConfigDict(
-        alias_generator=_snake_to_camel,
-        extra="forbid",
-        populate_by_name=True,
-    )
+type Score = Annotated[int, Field(ge=0, le=100)]
+type Title = Annotated[str, Field(min_length=1, max_length=200)]
+# ``status`` is annotated inline on every schema rather than through a ``type``
+# alias: a PEP 695 alias becomes the published OpenAPI component name, so an
+# alias here would rename ``ExampleStatus`` in ``components.schemas``.
+# ``Field(strict=False)`` is needed because FastAPI validates request bodies with
+# ``validate_python``, where the base ``strict=True`` would reject the JSON string
+# form of this ``StrEnum``; opting this one field out keeps ``"active"`` valid
+# while still rejecting non-string input such as ``0``.
 
 
-type Score = Annotated[int, Field(strict=True, ge=0, le=100)]
-type Title = Annotated[StrictStr, Field(min_length=1, max_length=200)]
-
-
-class ExampleCreate(_WriteSchema):
+class ExampleCreate(JsonApiWriteSchema):
     """Attributes accepted when creating an example."""
 
     title: Title
-    description: StrictStr | None = None
-    status: ExampleStatus
+    description: str | None = None
+    status: Annotated[ExampleStatus, Field(strict=False)]
     score: Score
 
 
-class ExampleUpdate(_WriteSchema):
+class ExampleUpdate(JsonApiWriteSchema):
     """Sparse attributes accepted by PATCH."""
 
     title: Title = MISSING  # type: ignore[assignment]
-    description: StrictStr | None = MISSING  # type: ignore[assignment]
-    status: ExampleStatus = MISSING  # type: ignore[assignment]
+    description: str | None = MISSING  # type: ignore[assignment]
+    status: Annotated[ExampleStatus, Field(strict=False)] = MISSING  # type: ignore[assignment]
     score: Score = MISSING  # type: ignore[assignment]
 
 
-class ExampleReplace(_WriteSchema):
+class ExampleReplace(JsonApiWriteSchema):
     """Complete attributes accepted by PUT replacement/upsert."""
 
     title: Title
-    description: StrictStr | None = None
-    status: ExampleStatus
+    description: str | None = None
+    status: Annotated[ExampleStatus, Field(strict=False)]
     score: Score
 
 
-class ToOneRelationship(_WriteSchema):
+class ToOneRelationship(JsonApiWriteSchema):
     """JSON:API to-one relationship linkage input."""
 
     data: ResourceIdentifier | None
 
 
-class ToManyRelationship(_WriteSchema):
+class ToManyRelationship(JsonApiWriteSchema):
     """JSON:API to-many relationship linkage input."""
 
     data: list[ResourceIdentifier]
 
 
-class ExampleRelationships(_WriteSchema):
+class ExampleRelationships(JsonApiWriteSchema):
     """Optional example relationship members used by relationship-aware actions."""
 
     category: ToOneRelationship = MISSING  # type: ignore[assignment]
@@ -98,6 +92,21 @@ def _parse_datetime(value: str) -> datetime:
     return parsed
 
 
+# Index coverage for this policy (see the root AGENTS.md rule on keeping a
+# QueryPolicy and the physical schema in sync):
+#   - default sort ``createdAt DESC`` plus the ``id`` tie breaker is covered by
+#     ``ix_examples_created_at_id`` (created_at DESC, id).
+#   - ``category.id`` is covered by ``ix_examples_category_id``.
+#   - sorting on title/status/score/updatedAt and filtering on
+#     status/score/createdAt are deliberately left unindexed: ``examples`` is a
+#     template demonstration resource with no real access pattern to justify the
+#     write cost. A real service must re-decide this, and note that every sort
+#     gets ``id ASC`` appended, so a useful index is ``(<column>, id)``, not the
+#     bare column.
+#   - ``title`` ``contains`` compiles to ``LIKE '%...%'`` (app/jsonapi/query.py),
+#     which no btree can serve. Adopting pg_trgm is deferred until a real usage
+#     pattern justifies the extension; the operator stays in the public
+#     allowlist meanwhile.
 EXAMPLE_QUERY_POLICY = QueryPolicy(
     filters={
         "title": FilterField(

@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from threading import Barrier
 from typing import ClassVar
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
-from sqlalchemy import Engine, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import Engine, ForeignKey, String, event, func, select
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
 from app.controllers.concerns.crud_actions import CrudActions
+from app.controllers.concerns.jsonapi_controller import JsonApiController
 from app.jsonapi import JSONAPI_MEDIA_TYPE, JsonApiException, register_exception_handlers
+from app.jsonapi.naming import JsonApiWriteSchema
+from app.jsonapi.query import QueryPolicy, SortTerm
 from app.models import Example, ExampleCategory, ExampleStatus, ExampleTag
 from app.schemas.example import (
     EXAMPLE_QUERY_POLICY,
@@ -26,6 +32,7 @@ from app.schemas.example import (
     ExampleUpdate,
 )
 from app.serializers import ExampleSerializer
+from app.serializers.base import JsonApiSerializer, RelationshipDefinition
 from config.database import get_session
 
 
@@ -35,7 +42,7 @@ class UpsertController(CrudActions[Example, ExampleCreate, ExampleUpdate, Exampl
     create_schema = ExampleCreate
     update_schema = ExampleUpdate
     replace_schema = ExampleReplace
-    relationships_schema = ExampleRelationships
+    relationships_schema: type[BaseModel] | None = ExampleRelationships
     query_policy = EXAMPLE_QUERY_POLICY
     enable_upsert = True
     hook_log: ClassVar[list[str]] = []
@@ -60,9 +67,16 @@ class RollbackUpsertController(UpsertController):
 
 
 class SerializationFailureUpsertController(UpsertController):
+    """Force a serializer failure inside the upsert transaction.
+
+    ``tags`` is expired because it has no ``linkage_attribute``: its linkage cannot be
+    derived from a local foreign key, so an unloaded ``tags`` is still the one relationship
+    that makes serialization fail after the hooks ran.
+    """
+
     def after_upsert(self, session: Session, model: Example, attributes: ExampleReplace) -> None:
         del attributes
-        session.expire(model, ["category"])
+        session.expire(model, ["tags"])
 
 
 class MappedFieldHookController(UpsertController):
@@ -106,7 +120,7 @@ class RelationshipOverrideController(UpsertController):
         super().assign_relationships(session, model, relationships)
 
 
-def _app(controller: UpsertController, session_factory: Callable[[], Session]) -> FastAPI:
+def _app(controller: JsonApiController, session_factory: Callable[[], Session]) -> FastAPI:
     app = FastAPI()
     register_exception_handlers(app)
     app.include_router(controller.router)
@@ -130,6 +144,7 @@ def _document(
     score: int = 10,
     description: str | None | object = None,
     category_id: UUID | None = None,
+    tag_ids: Sequence[UUID] = (),
 ) -> dict[str, object]:
     attributes: dict[str, object] = {
         "title": title,
@@ -143,16 +158,81 @@ def _document(
         "id": str(resource_id),
         "attributes": attributes,
     }
+    relationships: dict[str, object] = {}
     if category_id is not None:
-        data["relationships"] = {
-            "category": {
-                "data": {"type": "exampleCategories", "id": str(category_id)},
-            }
+        relationships["category"] = {
+            "data": {"type": "exampleCategories", "id": str(category_id)},
         }
+    if tag_ids:
+        relationships["tags"] = {
+            "data": [{"type": "exampleTags", "id": str(tag_id)} for tag_id in tag_ids],
+        }
+    if relationships:
+        data["relationships"] = relationships
     return {"data": data}
 
 
 _OMITTED = object()
+
+
+@contextmanager
+def _recorded_statements(engine: Engine) -> Iterator[list[str]]:
+    """Collect every SQL statement the engine executes while the block runs.
+
+    The listener is always removed again so a leaked one cannot pollute the statement
+    counts of the next test.
+    """
+
+    statements: list[str] = []
+
+    def record(
+        connection: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del connection, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.split()))
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+
+def _addressed_row_reads(statements: Sequence[str]) -> list[str]:
+    """Return every full read of the addressed example row.
+
+    ``PUT`` used to read that row twice: once to decide 201 vs 200 and once more after the
+    atomic statement. The post-flush ``updated_at`` refresh selects a single column, so it
+    is deliberately not a full read and is not counted here.
+    """
+
+    return [
+        statement
+        for statement in statements
+        if statement.startswith("SELECT ")
+        and " FROM examples WHERE examples.id = " in statement
+        and "examples.title" in statement
+    ]
+
+
+def _reverse_collection_reads(statements: Sequence[str]) -> list[str]:
+    """Return reads that walk a relationship target's reverse collection.
+
+    Their cost grows with the target's collection, not with the request, so they are pinned
+    semantically rather than by a count.
+    """
+
+    return [
+        statement
+        for statement in statements
+        if statement.startswith("SELECT ")
+        and ("= examples.category_id" in statement or "example_tags.tag_id" in statement)
+    ]
 
 
 def test_put_creates_then_fully_replaces_resource(
@@ -216,6 +296,144 @@ def test_put_creates_then_fully_replaces_resource(
     assert persisted is not None
     assert persisted.description is None
     assert persisted.category_id is None
+
+
+def test_put_create_reads_the_resource_once(
+    db_engine: Engine,
+    committed_session: Session,
+) -> None:
+    del committed_session
+    resource_id = uuid4()
+    app = _app(
+        UpsertController(prefix="/api/v1/examples", tags=["examples"]),
+        lambda: Session(bind=db_engine, expire_on_commit=False),
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client, _recorded_statements(db_engine) as statements:
+        response = client.put(
+            f"/api/v1/examples/{resource_id}",
+            headers={"Content-Type": JSONAPI_MEDIA_TYPE},
+            json=_document(resource_id, title="한 번만 조회"),
+        )
+
+    assert response.status_code == 201
+    assert len(_addressed_row_reads(statements)) == 1
+    # pg_advisory_xact_lock, SELECT examples, INSERT ... ON CONFLICT ... RETURNING
+    assert len(statements) == 3, statements
+    assert statements[0].startswith("SELECT pg_advisory_xact_lock")
+    assert statements[2].startswith("INSERT INTO examples")
+    assert "ON CONFLICT" in statements[2]
+
+
+def test_put_create_with_relationships_reads_the_resource_once(
+    db_engine: Engine,
+    committed_session: Session,
+) -> None:
+    category = ExampleCategory(name="관계 카운트")
+    tag = ExampleTag(name="관계 카운트 태그")
+    committed_session.add_all([category, tag])
+    committed_session.commit()
+    resource_id = uuid4()
+    app = _app(
+        UpsertController(prefix="/api/v1/examples", tags=["examples"]),
+        lambda: Session(bind=db_engine, expire_on_commit=False),
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client, _recorded_statements(db_engine) as statements:
+        response = client.put(
+            f"/api/v1/examples/{resource_id}",
+            headers={"Content-Type": JSONAPI_MEDIA_TYPE},
+            json=_document(resource_id, title="관계 포함", category_id=category.id, tag_ids=[tag.id]),
+        )
+
+    assert response.status_code == 201
+    relationships = response.json()["data"]["relationships"]
+    assert relationships["category"]["data"] == {"type": "exampleCategories", "id": str(category.id)}
+    assert relationships["tags"]["data"] == [{"type": "exampleTags", "id": str(tag.id)}]
+    assert len(_addressed_row_reads(statements)) == 1
+    # pg_advisory_xact_lock, SELECT examples, SELECT categories, SELECT tags,
+    # INSERT ... ON CONFLICT ... RETURNING, UPDATE examples SET category_id,
+    # INSERT INTO example_tags, SELECT examples.updated_at
+    assert len(statements) == 8, statements
+
+    committed_session.expire_all()
+    persisted = committed_session.get(Example, resource_id)
+    assert persisted is not None
+    assert persisted.category_id == category.id
+    assert [related.id for related in persisted.tags] == [tag.id]
+
+
+def test_put_create_does_not_load_reverse_relationship_collections(
+    db_engine: Engine,
+    committed_session: Session,
+) -> None:
+    category = ExampleCategory(name="기존 소유 카테고리")
+    tag = ExampleTag(name="기존 소유 태그")
+    owned = Example(
+        title="이미 존재",
+        description=None,
+        status=ExampleStatus.DRAFT,
+        score=10,
+        category=category,
+    )
+    ExampleSerializer.initialize_relationship_defaults(owned)
+    owned.tags = [tag]
+    committed_session.add(owned)
+    committed_session.commit()
+    resource_id = uuid4()
+    app = _app(
+        UpsertController(prefix="/api/v1/examples", tags=["examples"]),
+        lambda: Session(bind=db_engine, expire_on_commit=False),
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client, _recorded_statements(db_engine) as statements:
+        response = client.put(
+            f"/api/v1/examples/{resource_id}",
+            headers={"Content-Type": JSONAPI_MEDIA_TYPE},
+            json=_document(resource_id, title="역방향 미적재", category_id=category.id, tag_ids=[tag.id]),
+        )
+
+    assert response.status_code == 201
+    assert _reverse_collection_reads(statements) == []
+
+    committed_session.expire_all()
+    persisted = committed_session.get(Example, resource_id)
+    assert persisted is not None
+    assert persisted.category_id == category.id
+    assert [related.id for related in persisted.tags] == [tag.id]
+
+
+def test_put_replace_statement_count_is_unchanged(
+    db_engine: Engine,
+    committed_session: Session,
+) -> None:
+    del committed_session
+    resource_id = uuid4()
+    app = _app(
+        UpsertController(prefix="/api/v1/examples", tags=["examples"]),
+        lambda: Session(bind=db_engine, expire_on_commit=False),
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        created = client.put(
+            f"/api/v1/examples/{resource_id}",
+            headers={"Content-Type": JSONAPI_MEDIA_TYPE},
+            json=_document(resource_id, title="교체 전"),
+        )
+        with _recorded_statements(db_engine) as statements:
+            replaced = client.put(
+                f"/api/v1/examples/{resource_id}",
+                headers={"Content-Type": JSONAPI_MEDIA_TYPE},
+                json=_document(resource_id, title="교체 후"),
+            )
+
+    assert created.status_code == 201
+    assert replaced.status_code == 200
+    assert len(_addressed_row_reads(statements)) == 1
+    # pg_advisory_xact_lock, SELECT examples, selectin tags, INSERT ... ON CONFLICT.
+    # The replace path is deliberately untouched: its two loads are what serialize the
+    # response relationships, not a duplicate read.
+    assert len(statements) == 4, statements
 
 
 def test_put_create_rolls_back_when_response_serialization_fails(
@@ -384,7 +602,7 @@ def test_before_upsert_foreign_key_is_not_overwritten_by_omitted_relationship(
         lambda: Session(bind=db_engine, expire_on_commit=False),
     )
 
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with TestClient(app, raise_server_exceptions=False) as client, _recorded_statements(db_engine) as statements:
         response = client.put(
             f"/foreign-key-hook-examples/{resource_id}",
             headers={"Content-Type": JSONAPI_MEDIA_TYPE},
@@ -392,6 +610,10 @@ def test_before_upsert_foreign_key_is_not_overwritten_by_omitted_relationship(
         )
 
     assert response.status_code == 201
+    assert len(_addressed_row_reads(statements)) == 1
+    # pg_advisory_xact_lock, SELECT examples, INSERT ... ON CONFLICT ... RETURNING,
+    # SELECT categories to materialize the linkage the hook wrote as a bare foreign key
+    assert len(statements) == 4, statements
     assert response.json()["data"]["relationships"]["category"]["data"] == {
         "type": "exampleCategories",
         "id": str(category.id),
@@ -509,3 +731,209 @@ def test_concurrent_puts_to_the_same_uuid_leave_one_resource(
         persisted = verification_session.get(Example, resource_id)
         assert persisted is not None
         assert persisted.title in {"첫 번째", "두 번째"}
+
+
+class ConcurrentlyCreatedUpsertController(UpsertController):
+    """Let another transaction commit the addressed row after the pre-check decided.
+
+    ``before_upsert`` runs inside the write transaction, after ``created`` was fixed by
+    the pre-check ``SELECT`` and before the ``INSERT ... ON CONFLICT DO UPDATE`` runs, so
+    committing the row here is exactly the window the advisory lock cannot close: a plain
+    insert from another connection never takes that lock.
+    """
+
+    rival_engine: ClassVar[Engine | None] = None
+    rival_tag_id: ClassVar[UUID | None] = None
+
+    def before_upsert(self, session: Session, model: Example, attributes: ExampleReplace) -> None:
+        super().before_upsert(session, model, attributes)
+        engine = type(self).rival_engine
+        tag_id = type(self).rival_tag_id
+        assert engine is not None
+        assert tag_id is not None
+        with Session(bind=engine, expire_on_commit=False) as rival:
+            tag = rival.get(ExampleTag, tag_id)
+            assert tag is not None
+            rival_model = Example(
+                id=model.id,
+                title="다른 트랜잭션",
+                description=None,
+                status=ExampleStatus.DRAFT,
+                score=1,
+            )
+            ExampleSerializer.initialize_relationship_defaults(rival_model)
+            rival_model.tags = [tag]
+            rival.add(rival_model)
+            rival.commit()
+
+
+def test_put_create_reads_back_when_postgresql_took_the_conflict_update_branch(
+    db_engine: Engine,
+    committed_session: Session,
+) -> None:
+    """``created`` comes from a pre-check; only ``xmax`` says which branch really ran.
+
+    Trusting the pre-check let the in-place fast path publish a committed 201 document
+    whose ``tags`` linkage was empty while the row it described already carried a tag.
+    """
+
+    tag = ExampleTag(name="경쟁 태그")
+    committed_session.add(tag)
+    committed_session.commit()
+    tag_id = tag.id
+    resource_id = uuid4()
+    ConcurrentlyCreatedUpsertController.rival_engine = db_engine
+    ConcurrentlyCreatedUpsertController.rival_tag_id = tag_id
+    app = _app(
+        ConcurrentlyCreatedUpsertController(prefix="/api/v1/examples", tags=["examples"]),
+        lambda: Session(bind=db_engine, expire_on_commit=False),
+    )
+
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client, _recorded_statements(db_engine) as statements:
+            response = client.put(
+                f"/api/v1/examples/{resource_id}",
+                headers={"Content-Type": JSONAPI_MEDIA_TYPE},
+                json=_document(resource_id, title="이 요청"),
+            )
+    finally:
+        ConcurrentlyCreatedUpsertController.rival_engine = None
+        ConcurrentlyCreatedUpsertController.rival_tag_id = None
+
+    assert response.status_code == 201
+    body = response.json()["data"]
+    assert body["attributes"]["title"] == "이 요청"
+    assert body["relationships"]["tags"]["data"] == [{"type": "exampleTags", "id": str(tag_id)}]
+    # A stale "create" verdict falls back to the read-back path, unlike a real create.
+    assert len(_addressed_row_reads(statements)) == 2
+
+    committed_session.expire_all()
+    persisted = committed_session.get(Example, resource_id)
+    assert persisted is not None
+    assert persisted.title == "이 요청"
+    assert [related.id for related in persisted.tags] == [tag_id]
+
+
+class _RemoteFkBase(DeclarativeBase):
+    """Declarative base for a to-one whose foreign key lives on the remote side.
+
+    No application model has that shape, and it is the shape that breaks when a created
+    to-one is resolved as ``session.get(target, <local column>)``: the local column is the
+    owner primary key, so the lookup fetches whichever target happens to share its value.
+    """
+
+
+class _RemoteFkOwner(_RemoteFkBase):
+    __tablename__ = "upsert_remote_fk_owners"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    profile: Mapped[_RemoteFkProfile | None] = relationship(back_populates="owner", uselist=False)
+
+
+class _RemoteFkProfile(_RemoteFkBase):
+    __tablename__ = "upsert_remote_fk_profiles"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    owner_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("upsert_remote_fk_owners.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    owner: Mapped[_RemoteFkOwner] = relationship(back_populates="profile")
+
+
+class _RemoteFkProfileSerializer(JsonApiSerializer[_RemoteFkProfile]):
+    type_name = "upsertRemoteFkProfiles"
+    resource_path = None
+    attributes = ()
+
+
+class _RemoteFkOwnerSerializer(JsonApiSerializer[_RemoteFkOwner]):
+    type_name = "upsertRemoteFkOwners"
+    resource_path = "/remote-fk-owners"
+    attributes = ("title",)
+    relationships: ClassVar[dict[str, RelationshipDefinition]] = {
+        "profile": RelationshipDefinition(
+            attribute="profile",
+            serializer=_RemoteFkProfileSerializer,
+            many=False,
+        )
+    }
+
+
+class _RemoteFkOwnerWrite(JsonApiWriteSchema):
+    title: str
+
+
+class RemoteFkUpsertController(
+    CrudActions[_RemoteFkOwner, _RemoteFkOwnerWrite, _RemoteFkOwnerWrite, _RemoteFkOwnerWrite]
+):
+    model_class = _RemoteFkOwner
+    serializer_class = _RemoteFkOwnerSerializer
+    create_schema = _RemoteFkOwnerWrite
+    update_schema = _RemoteFkOwnerWrite
+    replace_schema = _RemoteFkOwnerWrite
+    relationships_schema: type[BaseModel] | None = None
+    query_policy = QueryPolicy(
+        filters={},
+        sorts={"title": _RemoteFkOwner.title},
+        includes=frozenset({"profile"}),
+        default_sort=(SortTerm("title"),),
+        tie_breaker=SortTerm("id", column=_RemoteFkOwner.id),
+    )
+    enable_upsert = True
+
+
+@pytest.fixture
+def remote_fk_tables(db_engine: Engine) -> Iterator[None]:
+    _RemoteFkBase.metadata.create_all(db_engine)
+    try:
+        yield
+    finally:
+        _RemoteFkBase.metadata.drop_all(db_engine)
+
+
+def test_put_create_does_not_borrow_a_to_one_whose_foreign_key_lives_on_the_remote_side(
+    db_engine: Engine,
+    remote_fk_tables: None,
+) -> None:
+    """A created to-one must be resolved through the relationship join, not a bare get.
+
+    Reading ``RETURNING[<local column>]`` as a foreign key into the target primary key
+    made the 201 document advertise linkage to a profile owned by a different resource.
+    """
+
+    del remote_fk_tables
+    resource_id = uuid4()
+    with Session(bind=db_engine, expire_on_commit=False) as setup:
+        other_owner = _RemoteFkOwner(title="다른 소유자")
+        setup.add(other_owner)
+        setup.flush()
+        other_owner_id = other_owner.id
+        setup.add(_RemoteFkProfile(id=resource_id, owner_id=other_owner_id))
+        setup.commit()
+
+    app = _app(
+        RemoteFkUpsertController(prefix="/remote-fk-owners", tags=["remote-fk-owners"]),
+        lambda: Session(bind=db_engine, expire_on_commit=False),
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.put(
+            f"/remote-fk-owners/{resource_id}",
+            headers={"Content-Type": JSONAPI_MEDIA_TYPE},
+            json={
+                "data": {
+                    "type": "upsertRemoteFkOwners",
+                    "id": str(resource_id),
+                    "attributes": {"title": "새 소유자"},
+                }
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["relationships"]["profile"]["data"] is None
+    with Session(bind=db_engine, expire_on_commit=False) as verification:
+        borrowed = verification.get(_RemoteFkProfile, resource_id)
+        assert borrowed is not None
+        assert borrowed.owner_id == other_owner_id

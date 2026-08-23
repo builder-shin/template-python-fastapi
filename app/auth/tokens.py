@@ -6,7 +6,7 @@ import hashlib
 import hmac
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, cast
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import jwt
@@ -142,6 +142,13 @@ def _typed_claims(
     expected_type: TokenType,
     settings: AuthSettings,
 ) -> TokenClaims:
+    # jwt.decode already enforced the HS256 signature, the presence of every
+    # REQUIRED_CLAIMS entry, string-typed "sub"/"jti"/"iss", "iss" equality and
+    # numeric "iat"/"exp" coercion, plus non-strict "aud" membership.
+    # This helper adds what PyJWT leaves open: a non-empty "sub", a UUID-parsable
+    # "jti", "type" equal to the expected token type, numeric dates that reject
+    # bool, and an "aud" that equals the configured audience exactly instead of
+    # merely containing it.
     try:
         sub = payload["sub"]
         raw_jti = payload["jti"]
@@ -157,13 +164,11 @@ def _typed_claims(
         jti = UUID(raw_jti)
         if raw_type != expected_type:
             raise ValueError
-        if not isinstance(raw_type, str) or raw_type not in ("access", "refresh"):
-            raise ValueError
         if not _is_numeric_date(raw_iat) or not _is_numeric_date(raw_exp):
             raise ValueError
-        if issuer != settings.issuer or not isinstance(issuer, str):
+        if issuer != settings.issuer:
             raise ValueError
-        if audience != settings.audience or not isinstance(audience, str):
+        if audience != settings.audience:
             raise ValueError
         iat = datetime.fromtimestamp(raw_iat, UTC)
         exp = datetime.fromtimestamp(raw_exp, UTC)
@@ -173,7 +178,7 @@ def _typed_claims(
     return TokenClaims(
         sub=sub,
         jti=jti,
-        type=cast(TokenType, raw_type),
+        type=expected_type,
         iat=iat,
         exp=exp,
         iss=issuer,

@@ -2,6 +2,9 @@
 
 ## 아키텍처 규칙
 
+- 모든 컨트롤러는 `JsonApiController`를 상속한다. 리소스 컨트롤러는 `CrudActions`를 통해, 그 밖의 컨트롤러는 직접 상속한다.
+- `APIRouter`를 컨트롤러에서 직접 조립하지 않는다. prefix 검증, `Accept` 협상, `Content-Type` 검증은 base가 소유한다.
+- `Accept` 협상을 생략하는 컨트롤러는 `negotiate_accept = False`로, 루트에 마운트되는 컨트롤러는 `allow_root_prefix = True`로 그 의도를 코드에 남긴다. router 인자를 빠뜨려서 표현하지 않는다.
 - 새 JSON:API 리소스 컨트롤러는 `CrudActions`를 상속한다.
 - 컨트롤러에는 모델, 시리얼라이저, create/update/replace 스키마, 관계 스키마, 조회 정책을 선언한다.
 - 공통 액션으로 표현할 수 없는 도메인 동작만 명시적 훅이나 메서드 재정의로 추가한다.
@@ -23,20 +26,39 @@
 ## 검증 명령
 
 ```bash
-uv sync
+uv sync --frozen
 ./scripts/check.sh
 docker compose config --quiet
+docker build --target runtime --tag template-python-fastapi:verify .
 docker compose up -d --build --wait
 docker compose down -v
 ```
+
+이 목록은 `README.md`의 `## 검증` 절과 문자열 단위로 동일하게 유지한다. 한쪽만 고치면 `tests/docs/test_readme.py`가 실패한다.
+
+자주 쓰는 개별 단계는 `uv run poe <task>`로도 실행할 수 있다. 태스크 정의는 `pyproject.toml`의 `[tool.poe.tasks]` 한 곳에만 둔다.
+
+| 태스크 | 실행 내용 |
+| --- | --- |
+| `lint` / `format` / `format-check` | `ruff check .` / `ruff format .` / `ruff format --check .` |
+| `typecheck` | `mypy .` (`app`·`config`·`db`·`tests` 전체) |
+| `test` | `pytest` (coverage gate 포함) |
+| `test-jsonapi` / `test-controllers` / `test-db` | 아래 "변경별 최소 확인"의 좁은 pytest 명령 |
+| `migrate` / `seed` | `alembic upgrade head` / `python -m db.seeds` |
+| `db-up` / `worker` / `compose-verify` | Compose 서비스 기동과 설정 검증 |
+| `check` | `./scripts/check.sh` 호출만 한다. Docker 임시 DB 프로비저닝을 poe로 재구현하지 않는다 |
+
+`check`를 제외한 태스크는 bash 없이 Windows에서도 동작한다. 전체 게이트는 `scripts/check.sh`가 bash 스크립트이므로 Git Bash 또는 WSL이 필요하다.
 
 ## 조립점과 변경 순서
 
 - ASGI 진입점은 `config/asgi.py`, 애플리케이션 factory는 `config/main.py:create_app`이다. 새 전역 미들웨어나 예외 처리기는 factory에서 등록 순서까지 검토한다.
 - 공개 라우트는 `config/routes.py`에서 controller 인스턴스를 만들고 `api_router`에 명시적으로 포함한다. controller 모듈 import만으로 라우트가 생기게 하지 않는다.
 - 자원 추가는 `app/models`의 ORM 모델과 관계를 먼저 정하고, Alembic migration, `app/schemas`의 쓰기·조회 정책, `app/serializers`, 선언형 controller, `config/routes.py`, 관련 테스트 순으로 연결한다.
+- `QueryPolicy`에 filter·sort를 추가하거나 `default_sort`·`tie_breaker`를 바꿀 때는 해당 컬럼 조합의 인덱스 필요 여부를 함께 판단하고, 필요하면 같은 변경에서 모델 `__table_args__`와 Alembic migration에 동시에 반영한다. 인덱스를 만들지 않기로 했으면 근거를 정책 선언부에 남긴다.
 - `app/models`는 저장 구조와 관계, `app/schemas`는 입력 및 조회 allowlist, `app/serializers`는 공개 JSON:API 표현을 소유한다. 한 계층이 다른 계층의 책임을 대신하지 않는다.
-- 공통 CRUD 변경은 `app/controllers/concerns/crud_actions.py`, 프로토콜 변경은 `app/jsonapi/`에서만 검토한다. 자원 controller에 공통 동작을 복사하지 않는다.
+- 공통 CRUD 변경은 `app/controllers/concerns/` 디렉터리, 프로토콜 변경은 `app/jsonapi/`에서만 검토한다. 자원 controller에 공통 동작을 복사하지 않는다.
+- concern 안의 검토 지점은 책임별로 나뉜다: 라우트·OpenAPI responses·delegate는 `route_registrar.py`, linkage 해석과 관계 액션은 `relationship_resolver.py`, `PUT` upsert는 `upsert_executor.py`, 요청 문서 파싱·검증은 `document_parsing.py`, 선언 계약과 `before_*`/`after_*` 훅은 `crud_base.py`, 조립과 index/show/create/update/destroy 액션은 `crud_actions.py`다. 공개 진입점은 `CrudActions` 하나이며 상속 체인은 항상 아래 방향으로만 참조한다.
 
 ## HTTP·데이터 계약의 경계
 
@@ -56,11 +78,12 @@ docker compose down -v
 ## 변경별 최소 확인
 
 - 아래의 좁은 `uv run pytest` 명령은 `TEST_DATABASE_URL`이 독립된 `*_test` PostgreSQL을 가리킨 상태에서 실행한다. URL이 없으면 임의 DB로 대체하지 말고 `./scripts/check.sh`가 만드는 임시 Docker PostgreSQL 전체 게이트를 사용한다.
-- JSON:API 문서·협상·오류 변경: `uv run pytest --no-cov tests/jsonapi -q`
-- CRUD·관계·upsert 변경: `uv run pytest --no-cov tests/controllers -q`
-- migration·seed·세션 변경: `uv run pytest --no-cov tests/config tests/integration tests/test_database_fixtures.py -q`
-- API 변경의 최종 게이트: `uv sync && ./scripts/check.sh`
-- 컨테이너 설정만 바꿨을 때: `docker compose config --quiet`
+- JSON:API 문서·협상·오류 변경: `uv run pytest --no-cov tests/jsonapi -q` (`uv run poe test-jsonapi`)
+- CRUD·관계·upsert 변경: `uv run pytest --no-cov tests/controllers -q` (`uv run poe test-controllers`)
+- migration·seed·세션 변경: `uv run pytest --no-cov tests/config tests/integration tests/test_database_fixtures.py -q` (`uv run poe test-db`)
+- 타입 계약 변경: `uv run mypy .` (`uv run poe typecheck`) — `tests/`도 strict 검사 대상이다
+- API 변경의 최종 게이트: `uv sync --frozen && ./scripts/check.sh` (`uv run poe check`)
+- 컨테이너 설정만 바꿨을 때: `docker compose config --quiet` (`uv run poe compose-verify`)
 
 `./scripts/check.sh`는 별도 `TEST_DATABASE_URL`이 없으면 임시 Docker PostgreSQL을 만들고, Ruff·mypy·pytest·detect-secrets를 순서대로 실행한다. 이 검증을 SQLite 단위 테스트나 개발 서버 기동으로 대체하지 않는다.
 

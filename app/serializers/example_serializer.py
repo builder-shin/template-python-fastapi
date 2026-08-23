@@ -20,6 +20,7 @@ class ExampleSerializer(JsonApiSerializer[Example]):
                 attribute="category",
                 serializer=ExampleCategorySerializer,
                 many=False,
+                linkage_attribute="category_id",
             ),
             "tags": RelationshipDefinition(
                 attribute="tags",

@@ -2,61 +2,24 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
-from app.auth.passwords import hash_password
+from app.auth.dependencies import get_current_user
 from app.auth.tokens import create_token
 from app.jsonapi import JSONAPI_MEDIA_TYPE
 from app.models import User
 from config.auth import AuthSettings
-from config.database import get_auth_session, get_session
-from config.main import create_app
 
-PASSWORD = "dependency-test-password"  # pragma: allowlist secret
-
-
-@pytest.fixture
-def app(db_engine: Engine) -> FastAPI:
-    application = create_app()
-
-    def override_session() -> Iterator[Session]:
-        with Session(bind=db_engine, expire_on_commit=False) as session:
-            yield session
-
-    application.dependency_overrides[get_session] = override_session
-    application.dependency_overrides[get_auth_session] = override_session
-    return application
-
-
-@pytest.fixture
-def client(app: FastAPI) -> Iterator[TestClient]:
-    with TestClient(app, raise_server_exceptions=False) as test_client:
-        yield test_client
-
-
-def _persist_user(session: Session, *, is_active: bool = True) -> User:
-    user = User(
-        email="dependency@example.com",
-        password_hash=hash_password(PASSWORD),
-        is_active=is_active,
-    )
-    session.add(user)
-    session.commit()
-    return user
-
-
-def _access_token(app: FastAPI, user: User) -> str:
-    settings = app.state.auth_settings
-    assert isinstance(settings, AuthSettings)
-    return create_token(user.id, token_type="access", settings=settings)
+# Module level so the probe route below does not trip ruff B008 (call in a default).
+_PROBE_CURRENT_USER = Depends(get_current_user)
 
 
 def _get_me(client: TestClient, token: str | None = None, *, authorization: str | None = None):  # type: ignore[no-untyped-def]
@@ -90,14 +53,13 @@ def test_malformed_bearer_is_invalid_token(
 
 
 def test_refresh_token_cannot_authenticate_an_access_route(
-    app: FastAPI,
     client: TestClient,
     committed_session: Session,
+    persisted_user: Callable[..., User],
+    auth_settings: AuthSettings,
 ) -> None:
-    user = _persist_user(committed_session)
-    settings = app.state.auth_settings
-    assert isinstance(settings, AuthSettings)
-    token = create_token(user.id, token_type="refresh", settings=settings)
+    user = persisted_user(committed_session)
+    token = create_token(user.id, token_type="refresh", settings=auth_settings)
 
     response = _get_me(client, token)
 
@@ -106,13 +68,13 @@ def test_refresh_token_cannot_authenticate_an_access_route(
 
 
 def test_invalid_claims_are_invalid_token(
-    app: FastAPI,
     client: TestClient,
     committed_session: Session,
+    persisted_user: Callable[..., User],
+    auth_settings: AuthSettings,
 ) -> None:
-    user = _persist_user(committed_session)
-    settings = app.state.auth_settings
-    assert isinstance(settings, AuthSettings)
+    user = persisted_user(committed_session)
+    settings = auth_settings
     now = datetime.now(UTC)
     token = jwt.encode(
         {
@@ -135,13 +97,13 @@ def test_invalid_claims_are_invalid_token(
 
 
 def test_expired_access_token_is_token_expired(
-    app: FastAPI,
     client: TestClient,
     committed_session: Session,
+    persisted_user: Callable[..., User],
+    auth_settings: AuthSettings,
 ) -> None:
-    user = _persist_user(committed_session)
-    settings = app.state.auth_settings
-    assert isinstance(settings, AuthSettings)
+    user = persisted_user(committed_session)
+    settings = auth_settings
     token = create_token(
         user.id,
         token_type="access",
@@ -159,9 +121,11 @@ def test_deleted_user_token_is_invalid_token(
     app: FastAPI,
     client: TestClient,
     committed_session: Session,
+    persisted_user: Callable[..., User],
+    access_token: Callable[[FastAPI, User], str],
 ) -> None:
-    user = _persist_user(committed_session)
-    token = _access_token(app, user)
+    user = persisted_user(committed_session)
+    token = access_token(app, user)
     committed_session.delete(user)
     committed_session.commit()
 
@@ -175,11 +139,67 @@ def test_inactive_user_is_returned_by_current_user_dependency(
     app: FastAPI,
     client: TestClient,
     committed_session: Session,
+    persisted_user: Callable[..., User],
+    access_token: Callable[[FastAPI, User], str],
 ) -> None:
-    user = _persist_user(committed_session, is_active=False)
+    user = persisted_user(committed_session, is_active=False)
 
-    response = _get_me(client, _access_token(app, user))
+    response = _get_me(client, access_token(app, user))
 
     assert response.status_code == 200
     assert response.json()["data"]["id"] == str(user.id)
     assert response.json()["data"]["attributes"]["isActive"] is False
+
+
+def test_auth_lookup_session_is_closed_before_the_endpoint_runs(
+    app_factory: Callable[..., FastAPI],
+    db_engine: Engine,
+    committed_session: Session,
+    persisted_user: Callable[..., User],
+    access_token: Callable[[FastAPI, User], str],
+) -> None:
+    """The auth session must release its pool connection before the endpoint body."""
+
+    user = persisted_user(committed_session)
+    auth_sessions: list[Session] = []
+    observed_inside_endpoint: list[bool] = []
+
+    def override_auth_session_factory() -> Callable[[], Session]:
+        def build_session() -> Session:
+            session = Session(bind=db_engine, expire_on_commit=False)
+            auth_sessions.append(session)
+            return session
+
+        return build_session
+
+    application = app_factory(auth_session_factory_override=override_auth_session_factory)
+
+    # The ordering is only observable from INSIDE the endpoint body. Every assertion made
+    # after the request passes just as well against a generator dependency that holds the
+    # auth session open across the endpoint, which is exactly the regression this name
+    # claims to guard, so the probe route samples the session state at the right moment.
+    @application.get("/_probe/auth-session", include_in_schema=False)
+    def probe_auth_session(current_user: User = _PROBE_CURRENT_USER) -> dict[str, str]:
+        observed_inside_endpoint.append(auth_sessions[-1].in_transaction())
+        return {"id": str(current_user.id)}
+
+    token = access_token(application, user)
+
+    with TestClient(application, raise_server_exceptions=False) as detached_client:
+        probe_response = detached_client.get(
+            "/_probe/auth-session",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        response = _get_me(detached_client, token)
+
+    assert probe_response.status_code == 200
+    assert probe_response.json() == {"id": str(user.id)}
+    # Closed BEFORE the endpoint body ran, not merely by the end of the request.
+    assert observed_inside_endpoint == [False]
+
+    assert response.status_code == 200
+    assert len(auth_sessions) == 2
+    assert [session.in_transaction() for session in auth_sessions] == [False, False]
+    attributes = response.json()["data"]["attributes"]
+    assert attributes["email"] == user.email
+    assert attributes["isActive"] is True

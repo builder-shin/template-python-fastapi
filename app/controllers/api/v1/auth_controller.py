@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from enum import Enum
-from typing import Any, cast
-
-from fastapi import APIRouter, Body, Depends, Request, Response
+from fastapi import Body, Depends, Request, Response
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,34 +15,23 @@ from app.auth.refresh_sessions import (
     logout_refresh_session,
     rotate_refresh_session,
 )
-from app.controllers.concerns.jsonapi_routes import JsonApiRoute
+from app.controllers.concerns import JsonApiController
 from app.jsonapi import (
     JSONAPI_MEDIA_TYPE,
-    ErrorDocument,
     JsonApiException,
     JsonApiResponse,
     SuccessDocument,
-    require_jsonapi_accept,
+    jsonapi_error_responses,
 )
 from app.models import User
 from app.schemas import LoginDocument, RefreshTokenDocument, RegisterDocument, normalize_email
 from app.serializers import AuthTokenSerializer, UserSerializer
 from config.auth import AuthSettings, get_auth_settings
-from config.database import get_session
+from config.database import get_request_session
 
 _JSONAPI_BODY = Body(..., media_type=JSONAPI_MEDIA_TYPE)
-_SESSION_DEPENDENCY = Depends(get_session)
+_SESSION_DEPENDENCY = Depends(get_request_session)
 _AUTH_SETTINGS_DEPENDENCY = Depends(get_auth_settings)
-
-
-def _jsonapi_error_responses(*status_codes: int) -> dict[int | str, dict[str, Any]]:
-    return {
-        status_code: {
-            "description": "JSON:API error",
-            "model": ErrorDocument,
-        }
-        for status_code in status_codes
-    }
 
 
 def _integrity_constraint_name(error: IntegrityError) -> str | None:
@@ -54,18 +40,11 @@ def _integrity_constraint_name(error: IntegrityError) -> str | None:
     return constraint_name if isinstance(constraint_name, str) else None
 
 
-class AuthController:
+class AuthController(JsonApiController):
     """Expose registration and credential login through explicit JSON:API routes."""
 
     def __init__(self, *, prefix: str, tags: list[str]) -> None:
-        if not prefix.startswith("/") or prefix.endswith("/"):
-            raise ValueError("auth prefix must start with '/' and must not end with '/'")
-        self.router = APIRouter(
-            prefix=prefix,
-            tags=cast(list[str | Enum], tags),
-            dependencies=[Depends(require_jsonapi_accept)],
-            route_class=JsonApiRoute,
-        )
+        super().__init__(prefix=prefix, tags=tags)
         self.router.add_api_route(
             "/register",
             self.register,
@@ -73,7 +52,7 @@ class AuthController:
             response_class=JsonApiResponse,
             response_model=SuccessDocument,
             status_code=201,
-            responses=_jsonapi_error_responses(406, 409, 415, 422, 500),
+            responses=jsonapi_error_responses(406, 409, 415, 422, 500),
             name="AuthController.register",
         )
         self.router.add_api_route(
@@ -82,7 +61,7 @@ class AuthController:
             methods=["POST"],
             response_class=JsonApiResponse,
             response_model=SuccessDocument,
-            responses=_jsonapi_error_responses(401, 403, 406, 415, 422, 500),
+            responses=jsonapi_error_responses(401, 403, 406, 415, 422, 500),
             name="AuthController.login",
         )
         self.router.add_api_route(
@@ -91,7 +70,7 @@ class AuthController:
             methods=["POST"],
             response_class=JsonApiResponse,
             response_model=SuccessDocument,
-            responses=_jsonapi_error_responses(401, 403, 406, 415, 422, 500),
+            responses=jsonapi_error_responses(401, 403, 406, 415, 422, 500),
             name="AuthController.refresh",
         )
         self.router.add_api_route(
@@ -101,7 +80,7 @@ class AuthController:
             response_class=JsonApiResponse,
             response_model=None,
             status_code=204,
-            responses=_jsonapi_error_responses(401, 406, 415, 422, 500),
+            responses=jsonapi_error_responses(401, 406, 415, 422, 500),
             name="AuthController.logout",
         )
 
@@ -113,7 +92,6 @@ class AuthController:
     ) -> JsonApiResponse:
         """Create one normalized local account."""
 
-        request.state.session = session
         try:
             with session.begin():
                 attributes = document.data.attributes
@@ -147,7 +125,6 @@ class AuthController:
     ) -> JsonApiResponse:
         """Verify credentials and persist a refresh session atomically."""
 
-        request.state.session = session
         attributes = document.data.attributes
         email = normalize_email(str(attributes.email))
 
@@ -177,7 +154,6 @@ class AuthController:
     ) -> JsonApiResponse:
         """Rotate a valid refresh session in one caller-owned transaction."""
 
-        request.state.session = session
         with session.begin():
             outcome = rotate_refresh_session(
                 session,
@@ -198,7 +174,6 @@ class AuthController:
     ) -> Response:
         """Revoke one refresh session and return an empty idempotent response."""
 
-        request.state.session = session
         with session.begin():
             outcome = logout_refresh_session(
                 session,

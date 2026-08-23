@@ -71,6 +71,7 @@ services:
       DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
       DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
       REDIS_URL: ${COMPOSE_REDIS_URL:-redis://redis:6379/0}
+      REFRESH_SESSION_RETENTION_SECONDS: ${REFRESH_SESSION_RETENTION_SECONDS:-604800}
     depends_on:
       migrate:
         condition: service_completed_successfully

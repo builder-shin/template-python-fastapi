@@ -7,7 +7,7 @@ from collections.abc import Callable
 import pytest
 from fastapi import FastAPI, Request
 
-from config.auth import AuthSettings, get_auth_settings
+from config.auth import AuthSettings, RefreshSessionRetentionSettings, get_auth_settings
 from config.main import create_app
 
 AUTH_ENVIRONMENT_VARIABLES = (
@@ -138,3 +138,41 @@ def test_create_app_stores_auth_settings_before_including_routes(
     assert observed_settings == [app.state.auth_settings]
     request = Request({"type": "http", "app": app})
     assert get_auth_settings(request) is app.state.auth_settings
+
+
+def test_refresh_session_retention_defaults_to_seven_days(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REFRESH_SESSION_RETENTION_SECONDS", raising=False)
+
+    assert RefreshSessionRetentionSettings.from_env() == RefreshSessionRetentionSettings(retention_seconds=604_800)
+
+
+def test_refresh_session_retention_loads_without_any_jwt_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_auth_environment(monkeypatch)
+    monkeypatch.delenv("REFRESH_SESSION_RETENTION_SECONDS", raising=False)
+
+    with pytest.raises(ValueError, match="JWT_SECRET_KEY"):
+        AuthSettings.from_env()
+
+    assert RefreshSessionRetentionSettings.from_env().retention_seconds == 604_800
+
+
+@pytest.mark.parametrize(("value", "expected"), [("0", 0), ("60", 60), ("2592000", 2_592_000)])
+def test_refresh_session_retention_reads_environment_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    expected: int,
+) -> None:
+    monkeypatch.setenv("REFRESH_SESSION_RETENTION_SECONDS", value)
+
+    assert RefreshSessionRetentionSettings.from_env().retention_seconds == expected
+
+
+@pytest.mark.parametrize("value", ["-1", "not-an-integer", "1.5", ""])
+def test_refresh_session_retention_rejects_invalid_values(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("REFRESH_SESSION_RETENTION_SECONDS", value)
+
+    with pytest.raises(ValueError, match="REFRESH_SESSION_RETENTION_SECONDS"):
+        RefreshSessionRetentionSettings.from_env()

@@ -151,6 +151,36 @@ def test_rotate_rejects_unknown_jti_hash_mismatch_and_wrong_type(db_session: Ses
     assert mismatched_row.revoked_at is None
 
 
+@pytest.mark.parametrize(
+    "refresh_operation",
+    [rotate_refresh_session, logout_refresh_session],
+    ids=["rotate", "logout"],
+)
+@pytest.mark.parametrize("case", ["unknown_user", "unknown_jti", "hash_mismatch"])
+def test_rotate_and_logout_share_one_rejection_path(
+    db_session: Session,
+    refresh_operation: Callable[[Session, str, AuthSettings], object],
+    case: str,
+) -> None:
+    user = _persist_user(db_session)
+    now = datetime.now(UTC).replace(microsecond=0)
+    mismatched_row: RefreshSession | None = None
+    if case == "unknown_user":
+        raw_token = create_token(uuid4(), token_type="refresh", settings=SETTINGS, now=now)
+    elif case == "unknown_jti":
+        raw_token = create_token(user.id, token_type="refresh", settings=SETTINGS, now=now)
+    else:
+        raw_token, mismatched_row = _persist_token(db_session, user, now=now, stored_hash="0" * 64)
+    db_session.flush()
+
+    assert refresh_operation(db_session, raw_token, SETTINGS) == RefreshSessionError(
+        status_code=401,
+        code="INVALID_TOKEN",
+    )
+    if mismatched_row is not None:
+        assert mismatched_row.revoked_at is None
+
+
 def test_logout_is_idempotent_but_expired_token_is_revoked_with_error(db_session: Session) -> None:
     user = _persist_user(db_session)
     active = issue_token_pair(db_session, user, SETTINGS)

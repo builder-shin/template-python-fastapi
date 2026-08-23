@@ -19,6 +19,7 @@ node_modules/
 .omc/
 .claude/
 .jwshin/
-docs/
+/docs/
+# tests/docs/ holds the README, CI and tooling contract tests, not generated docs.
 .worktrees/
 .superpowers/

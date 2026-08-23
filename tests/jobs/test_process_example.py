@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from threading import Thread
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import dramatiq
@@ -11,6 +13,7 @@ import pytest
 from dramatiq import Worker
 from dramatiq.brokers.stub import StubBroker
 from dramatiq.middleware import Retries
+from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -42,11 +45,11 @@ def _example_state(example: Example) -> tuple[object, ...]:
 
 @pytest.fixture
 def actor_session_factory(
-    db_engine: object,
+    db_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Callable[[], Session]:
     factory = sessionmaker(bind=db_engine, expire_on_commit=False)
-    monkeypatch.setattr(example_job, "SessionFactory", factory)
+    monkeypatch.setattr(example_job, "get_session_factory", lambda: factory)
     return factory
 
 
@@ -80,7 +83,8 @@ def test_valid_example_logs_success_without_mutating_public_state(
     assert _example_state(persisted) == before
     success_records = [record for record in caplog.records if getattr(record, "event", None) == "example.processed"]
     assert len(success_records) == 2
-    assert all(record.example_id == str(example.id) for record in success_records)
+    # `example_id` arrives through logging `extra=`, so it is absent from LogRecord stubs.
+    assert all(record.example_id == str(example.id) for record in success_records)  # type: ignore[attr-defined]
 
 
 def test_malformed_uuid_warns_without_opening_database(
@@ -88,7 +92,7 @@ def test_malformed_uuid_warns_without_opening_database(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     session_factory = MagicSessionFactory()
-    monkeypatch.setattr(example_job, "SessionFactory", session_factory)
+    monkeypatch.setattr(example_job, "get_session_factory", lambda: session_factory)
     caplog.set_level(logging.WARNING, logger=example_job.__name__)
 
     result = process_example("not-a-uuid")
@@ -96,7 +100,7 @@ def test_malformed_uuid_warns_without_opening_database(
     assert result is None
     assert session_factory.calls == 0
     warning = next(record for record in caplog.records if getattr(record, "event", None) == "example.invalid_id")
-    assert warning.example_id == "not-a-uuid"
+    assert warning.example_id == "not-a-uuid"  # type: ignore[attr-defined]
 
 
 def test_missing_example_warns_and_returns_successfully(
@@ -110,7 +114,7 @@ def test_missing_example_warns_and_returns_successfully(
 
     assert result is None
     warning = next(record for record in caplog.records if getattr(record, "event", None) == "example.missing")
-    assert warning.example_id == str(missing_id)
+    assert warning.example_id == str(missing_id)  # type: ignore[attr-defined]
 
 
 def test_database_operational_error_propagates_to_dramatiq(
@@ -121,7 +125,7 @@ def test_database_operational_error_propagates_to_dramatiq(
     def unavailable_session() -> Session:
         raise error
 
-    monkeypatch.setattr(example_job, "SessionFactory", unavailable_session)
+    monkeypatch.setattr(example_job, "get_session_factory", lambda: unavailable_session)
 
     with pytest.raises(OperationalError) as raised:
         process_example(str(uuid4()))
@@ -131,7 +135,7 @@ def test_database_operational_error_propagates_to_dramatiq(
 
 def test_worker_retries_operational_error_then_consumes_same_string_message(
     committed_session: Session,
-    db_engine: object,
+    db_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     example = Example(title="Retry", status=ExampleStatus.DRAFT, score=25)
@@ -148,14 +152,14 @@ def test_worker_retries_operational_error_then_consumes_same_string_message(
             raise error
         return real_factory()
 
-    monkeypatch.setattr(example_job, "SessionFactory", flaky_session_factory)
+    monkeypatch.setattr(example_job, "get_session_factory", lambda: flaky_session_factory)
     original_options = dict(process_example.options)
     original_actor_broker = process_example.broker
     original_global_broker = dramatiq.get_broker()
     broker = StubBroker(middleware=[Retries(min_backoff=0, max_backoff=0)])
     worker = Worker(broker, worker_timeout=100)
-    worker_threads: list[object] = []
-    consumer_threads: list[object] = []
+    worker_threads: list[Thread] = []
+    consumer_threads: list[Thread] = []
 
     try:
         process_example.options.update(max_retries=1, min_backoff=0, max_backoff=0)
@@ -186,6 +190,43 @@ def test_worker_retries_operational_error_then_consumes_same_string_message(
     assert process_example.broker is original_actor_broker
     assert dramatiq.get_broker() is original_global_broker
     assert all(not thread.is_alive() for thread in [*worker_threads, *consumer_threads])
+
+
+def test_actor_resolves_the_session_factory_on_every_call(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    factory = RecordingSessionFactory()
+    resolutions = 0
+
+    def resolve_session_factory() -> RecordingSessionFactory:
+        nonlocal resolutions
+        resolutions += 1
+        return factory
+
+    monkeypatch.setattr(example_job, "get_session_factory", resolve_session_factory)
+    caplog.set_level(logging.WARNING, logger=example_job.__name__)
+
+    process_example(str(uuid4()))
+    process_example(str(uuid4()))
+
+    assert resolutions == 2
+    assert factory.calls == 2
+
+
+class RecordingSessionFactory:
+    """Count how often the actor opens a session without touching a database."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> MagicMock:
+        self.calls += 1
+        session = MagicMock(spec=Session)
+        session.get.return_value = None
+        context = MagicMock()
+        context.__enter__.return_value = session
+        return context
 
 
 class MagicSessionFactory:
