@@ -13,7 +13,8 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, func, select
+from httpx import Response
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth.passwords import DUMMY_PASSWORD_HASH, hash_password, verify_password
@@ -22,29 +23,9 @@ from app.auth.tokens import create_token, decode_token, hash_refresh_token
 from app.jsonapi import JSONAPI_MEDIA_TYPE
 from app.models import RefreshSession, User
 from config.auth import AuthSettings
-from config.database import get_session
-from config.main import create_app
 
 PASSWORD = "correct horse battery staple"  # pragma: allowlist secret
 WRONG_PASSWORD = "incorrect horse battery staple"  # pragma: allowlist secret
-
-
-@pytest.fixture
-def app(db_engine: Engine) -> FastAPI:
-    application = create_app()
-
-    def override_session() -> Iterator[Session]:
-        with Session(bind=db_engine, expire_on_commit=False) as session:
-            yield session
-
-    application.dependency_overrides[get_session] = override_session
-    return application
-
-
-@pytest.fixture
-def client(app: FastAPI) -> Iterator[TestClient]:
-    with TestClient(app, raise_server_exceptions=False) as test_client:
-        yield test_client
 
 
 def _register_document(
@@ -89,7 +70,7 @@ def _post_jsonapi(
     document: dict[str, object],
     *,
     accept_language: str | None = None,
-):  # type: ignore[no-untyped-def]
+) -> Response:
     headers = {"Accept": JSONAPI_MEDIA_TYPE, "Content-Type": JSONAPI_MEDIA_TYPE}
     if accept_language is not None:
         headers["Accept-Language"] = accept_language
@@ -147,20 +128,20 @@ def test_register_normalizes_email_hashes_password_and_returns_public_user(
 
 
 def test_register_normalizes_and_hashes_inside_the_caller_transaction(
+    app_factory: Callable[..., FastAPI],
     committed_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.controllers.api.v1 import auth_controller
 
-    application = create_app()
-
     def override_session() -> Iterator[Session]:
         yield committed_session
 
-    application.dependency_overrides[get_session] = override_session
+    application = app_factory(session_override=override_session)
     transaction_states: list[bool] = []
-    real_normalize_email = auth_controller.normalize_email
-    real_hash_password = auth_controller.hash_password
+    # auth_controller re-exports these helpers; strict mypy forbids implicit re-export reads.
+    real_normalize_email = auth_controller.normalize_email  # type: ignore[attr-defined]
+    real_hash_password = auth_controller.hash_password  # type: ignore[attr-defined]
 
     def recording_normalize_email(email: str) -> str:
         transaction_states.append(committed_session.in_transaction())
@@ -279,8 +260,8 @@ def test_concurrent_registration_of_same_normalized_email_has_one_winner(
 def test_login_returns_persisted_token_pair_with_strict_claims(
     client: TestClient,
     committed_session: Session,
-    app: FastAPI,
     caplog: pytest.LogCaptureFixture,
+    auth_settings: AuthSettings,
 ) -> None:
     user = _persist_user(committed_session)
     caplog.set_level(logging.DEBUG)
@@ -299,7 +280,7 @@ def test_login_returns_persisted_token_pair_with_strict_claims(
     assert resource["attributes"]["expiresIn"] == 900
     assert resource["attributes"]["refreshExpiresIn"] == 2_592_000
 
-    settings = cast(AuthSettings, app.state.auth_settings)
+    settings = auth_settings
     access_token = resource["attributes"]["accessToken"]
     refresh_token = resource["attributes"]["refreshToken"]
     access_claims = decode_token(access_token, expected_type="access", settings=settings)
@@ -332,7 +313,7 @@ def test_login_uses_dummy_hash_and_hides_email_existence(
     from app.controllers.api.v1 import auth_controller
 
     verified_hashes: list[str] = []
-    real_verify_password = auth_controller.verify_password
+    real_verify_password = auth_controller.verify_password  # type: ignore[attr-defined]
 
     def recording_verify(password: str, password_hash: str) -> bool:
         verified_hashes.append(password_hash)
@@ -401,7 +382,7 @@ def test_login_rechecks_active_state_after_concurrent_deactivation(
     allow_login_to_lock = Event()
     from app.controllers.api.v1 import auth_controller
 
-    real_verify_password = auth_controller.verify_password
+    real_verify_password = auth_controller.verify_password  # type: ignore[attr-defined]
 
     def pause_after_password_check(password: str, password_hash: str) -> bool:
         matches = real_verify_password(password, password_hash)
@@ -505,7 +486,7 @@ def test_issue_token_pair_leaves_commit_to_the_caller(
 def test_refresh_rotates_token_and_persists_the_replacement(
     client: TestClient,
     committed_session: Session,
-    app: FastAPI,
+    auth_settings: AuthSettings,
 ) -> None:
     user = _persist_user(committed_session)
     login_response = _post_jsonapi(client, "/api/v1/auth/login", _login_document())
@@ -524,7 +505,7 @@ def test_refresh_rotates_token_and_persists_the_replacement(
     resource = response.json()["data"]
     assert resource["type"] == "authTokens"
     assert resource["id"] != original_id
-    settings = cast(AuthSettings, app.state.auth_settings)
+    settings = auth_settings
     claims = decode_token(
         resource["attributes"]["refreshToken"],
         expected_type="refresh",
@@ -619,9 +600,10 @@ def test_inactive_user_refresh_revokes_session_before_returning_403(
 def test_concurrent_refresh_has_one_rotation_then_reuse_revokes_it(
     app: FastAPI,
     concurrent_session_factory: Callable[[], Session],
+    auth_settings: AuthSettings,
 ) -> None:
     setup_session = concurrent_session_factory()
-    settings = cast(AuthSettings, app.state.auth_settings)
+    settings = auth_settings
     with setup_session.begin():
         user = User(
             email="refresh-race@example.com",
@@ -686,10 +668,10 @@ def test_logout_is_empty_idempotent_and_rejects_invalid_token(
 def test_logout_expired_token_commits_revocation_before_error(
     client: TestClient,
     committed_session: Session,
-    app: FastAPI,
+    auth_settings: AuthSettings,
 ) -> None:
     user = _persist_user(committed_session)
-    settings = cast(AuthSettings, app.state.auth_settings)
+    settings = auth_settings
     issued_at = datetime.now(UTC) - timedelta(days=31)
     jti = uuid4()
     raw_token = create_token(
@@ -728,3 +710,17 @@ def test_logout_openapi_documents_empty_204_and_jsonapi_errors(app: FastAPI) -> 
     assert "content" not in responses["204"]
     for status_code in ("401", "406", "415", "422", "500"):
         assert set(responses[status_code]["content"]) == {JSONAPI_MEDIA_TYPE}
+
+
+def test_auth_openapi_uses_the_shared_error_response_descriptions(app: FastAPI) -> None:
+    """Every controller declares one description per error status, not its own wording."""
+
+    schema = app.openapi()
+    register_responses = schema["paths"]["/api/v1/auth/register"]["post"]["responses"]
+    login_responses = schema["paths"]["/api/v1/auth/login"]["post"]["responses"]
+
+    assert register_responses["409"]["description"] == "Resource conflict"
+    assert register_responses["422"]["description"] == "Validation error"
+    assert register_responses["415"]["description"] == "Unsupported media type"
+    assert login_responses["401"]["description"] == "Authentication required"
+    assert login_responses["403"]["description"] == "Forbidden"

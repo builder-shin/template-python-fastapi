@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import get_args
+from typing import Literal, get_args
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -159,7 +159,7 @@ def test_non_data_optional_member_annotations_do_not_accept_sentinel(
 @pytest.mark.parametrize("mode", ["validation", "serialization"])
 @pytest.mark.parametrize(("model_type", "field_names"), NON_DATA_OPTIONAL_SCHEMA_FIELDS)
 def test_non_data_optional_members_are_omittable_but_not_nullable_in_schema(
-    mode: str,
+    mode: Literal["validation", "serialization"],
     model_type: type[BaseModel],
     field_names: tuple[str, ...],
 ) -> None:
@@ -198,7 +198,7 @@ def test_omitted_members_never_leak_missing_sentinel_into_public_dumps() -> None
 
 def test_success_document_requires_data_member() -> None:
     with pytest.raises(ValidationError):
-        SuccessDocument()
+        SuccessDocument()  # type: ignore[call-arg]  # `data` is deliberately omitted.
 
 
 def test_document_rejects_explicit_null_data_and_errors_together() -> None:
@@ -217,7 +217,7 @@ def test_document_requires_data_errors_or_meta() -> None:
 @pytest.mark.parametrize("member", ["meta", "errors"])
 def test_document_does_not_count_null_as_a_required_member(member: str) -> None:
     with pytest.raises(ValidationError):
-        JsonApiDocument(**{member: None})
+        JsonApiDocument(**{member: None})  # type: ignore[arg-type]  # Null members are deliberately invalid.
 
 
 def test_document_rejects_included_without_data_member() -> None:
@@ -245,7 +245,7 @@ def test_error_object_requires_at_least_one_member() -> None:
 
 def test_error_document_rejects_empty_nested_error_object() -> None:
     with pytest.raises(ValidationError, match="error object requires at least one member"):
-        ErrorDocument(errors=[{}])
+        ErrorDocument(errors=[{}])  # type: ignore[list-item]  # Empty error object is deliberately invalid.
 
 
 @pytest.mark.parametrize(
@@ -254,7 +254,8 @@ def test_error_document_rejects_empty_nested_error_object() -> None:
         (ErrorObject(code="INVALID"), {"code": "INVALID"}),
         (ErrorObject(status="422", title="속성 오류"), {"status": "422", "title": "속성 오류"}),
         (
-            ErrorObject(source={"pointer": "/data/attributes/title"}),
+            # Pydantic coerces the mapping into ErrorSource; mypy only sees the declared model.
+            ErrorObject(source={"pointer": "/data/attributes/title"}),  # type: ignore[arg-type]
             {"source": {"pointer": "/data/attributes/title"}},
         ),
         (ErrorObject(meta={"request_id": "request-1"}), {"meta": {"request_id": "request-1"}}),
@@ -269,7 +270,7 @@ def test_error_object_accepts_any_single_supported_member(
 
 def test_models_reject_extra_members() -> None:
     with pytest.raises(ValidationError, match="extra_forbidden"):
-        ResourceObject(type="examples", id="abc", unexpected=True)
+        ResourceObject(type="examples", id="abc", unexpected=True)  # type: ignore[call-arg]
 
 
 def test_relationship_requires_data_links_or_meta() -> None:
@@ -279,16 +280,18 @@ def test_relationship_requires_data_links_or_meta() -> None:
 
 def test_relationship_does_not_accept_null_links_as_its_only_member() -> None:
     with pytest.raises(ValidationError):
-        RelationshipObject(links=None)
+        RelationshipObject(links=None)  # type: ignore[arg-type]  # Null links are deliberately invalid.
 
 
 def test_jsonapi_version_is_always_1_1() -> None:
     with pytest.raises(ValidationError):
-        SuccessDocument(data=[], jsonapi={"version": "1.0"})
+        SuccessDocument(data=[], jsonapi={"version": "1.0"})  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("mode", ["validation", "serialization"])
-def test_success_document_json_schema_keeps_concrete_data_and_jsonapi_structure(mode: str) -> None:
+def test_success_document_json_schema_keeps_concrete_data_and_jsonapi_structure(
+    mode: Literal["validation", "serialization"],
+) -> None:
     schema = SuccessDocument.model_json_schema(mode=mode)
 
     assert schema["additionalProperties"] is False
@@ -368,7 +371,7 @@ def test_error_object_serializes_source_links_and_recursive_meta() -> None:
         code="INVALID_ATTRIBUTE",
         title="속성 오류",
         detail="title이 필요합니다.",
-        source={"pointer": "/data/attributes/title", "parameter": "title"},
+        source={"pointer": "/data/attributes/title", "parameter": "title"},  # type: ignore[arg-type]
         links={"about": "/errors/INVALID_ATTRIBUTE"},
         meta={"context": {"fields": ["title", None], "retryable": False}},
     )
@@ -421,13 +424,13 @@ def test_link_object_and_null_link_follow_jsonapi_1_1_shape() -> None:
 
 def test_link_object_rejects_extra_members() -> None:
     with pytest.raises(ValidationError, match="extra_forbidden"):
-        LinkObject(href="/examples/abc", unexpected=True)
+        LinkObject(href="/examples/abc", unexpected=True)  # type: ignore[call-arg]
 
 
 def test_error_source_supports_header() -> None:
     error = ErrorObject(
         status="400",
-        source={"header": "X-Request-ID"},
+        source={"header": "X-Request-ID"},  # type: ignore[arg-type]
     )
 
     assert error.model_dump(mode="json", exclude_none=True)["source"] == {

@@ -2,24 +2,27 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Annotated, Any, ClassVar
+from urllib.parse import parse_qsl, urlsplit
 from uuid import uuid4
 
 import pytest
-from fastapi import Body, FastAPI
+from fastapi import Body, Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import Engine, Select, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import JSON, Engine, Integer, Select, event, func, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 from starlette.datastructures import QueryParams
 from starlette.responses import Response
 
 from app.controllers.concerns.crud_actions import CrudActions
-from app.jsonapi import JSONAPI_MEDIA_TYPE, JsonApiException, ResourceIdentifier, register_exception_handlers
-from app.jsonapi.query import parse_query
-from app.models import Example, ExampleStatus
+from app.controllers.concerns.jsonapi_routes import validate_route_prefix
+from app.jsonapi import JSONAPI_MEDIA_TYPE, JsonApiException, ResourceIdentifier
+from app.jsonapi.query import QueryPolicy, parse_query
+from app.models import Example, ExampleCategory, ExampleStatus, ExampleTag
 from app.schemas.example import (
     EXAMPLE_QUERY_POLICY,
     ExampleCreate,
@@ -28,7 +31,7 @@ from app.schemas.example import (
     ExampleUpdate,
 )
 from app.serializers import ExampleSerializer
-from config.database import get_session
+from config.database import get_request_session
 
 
 class ExampleCrudController(CrudActions[Example, ExampleCreate, ExampleUpdate, ExampleReplace]):
@@ -73,15 +76,24 @@ class RollbackController(ExampleCrudController):
 
 
 class CreateSerializationFailureController(ExampleCrudController):
+    """Force a serializer failure inside the write transaction.
+
+    ``tags`` is expired because it has no ``linkage_attribute``: its linkage cannot be
+    derived from a local foreign key, so an unloaded ``tags`` is still the one relationship
+    that makes serialization fail after the hooks ran.
+    """
+
     def after_create(self, session: Session, model: Example, attributes: ExampleCreate) -> None:
         del attributes
-        session.expire(model, ["category"])
+        session.expire(model, ["tags"])
 
 
 class UpdateSerializationFailureController(ExampleCrudController):
+    """Force a serializer failure inside the update transaction; see the create twin."""
+
     def after_update(self, session: Session, model: Example, attributes: ExampleUpdate) -> None:
         del attributes
-        session.expire(model, ["category"])
+        session.expire(model, ["tags"])
 
 
 class ScopedCrudController(ExampleCrudController):
@@ -100,6 +112,8 @@ class ScopedCrudController(ExampleCrudController):
             values["title"] = title.upper()
         return values
 
+
+_REQUEST_SESSION_DEPENDENCY = Depends(get_request_session)
 
 dependency_log: list[str] = []
 
@@ -144,18 +158,9 @@ class BodyDeleteController(ExampleCrudController):
 
 
 @pytest.fixture
-def crud_app(db_engine: Engine) -> Iterator[FastAPI]:
+def crud_app(minimal_app_factory: Callable[..., FastAPI]) -> FastAPI:
     ExampleCrudController.hook_log.clear()
-    app = FastAPI()
-    register_exception_handlers(app)
-    app.include_router(ExampleCrudController(prefix="/api/v1/examples", tags=["examples"]).router)
-
-    def override_session() -> Iterator[Session]:
-        with Session(bind=db_engine, expire_on_commit=False) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
-    yield app
+    return minimal_app_factory(ExampleCrudController(prefix="/api/v1/examples", tags=["examples"]).router)
 
 
 @pytest.fixture
@@ -207,18 +212,10 @@ def test_create_runs_hooks_inside_transaction(crud_client: TestClient) -> None:
 
 
 def test_create_rolls_back_when_after_hook_raises(
-    db_engine: Engine,
     committed_session: Session,
+    minimal_app_factory: Callable[..., FastAPI],
 ) -> None:
-    app = FastAPI()
-    register_exception_handlers(app)
-    app.include_router(RollbackController(prefix="/rollback-examples", tags=["examples"]).router)
-
-    def override_session() -> Iterator[Session]:
-        with Session(bind=db_engine, expire_on_commit=False) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
+    app = minimal_app_factory(RollbackController(prefix="/rollback-examples", tags=["examples"]).router)
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.post(
             "/rollback-examples",
@@ -231,18 +228,12 @@ def test_create_rolls_back_when_after_hook_raises(
 
 
 def test_create_rolls_back_when_response_serialization_fails(
-    db_engine: Engine,
     committed_session: Session,
+    minimal_app_factory: Callable[..., FastAPI],
 ) -> None:
-    app = FastAPI()
-    register_exception_handlers(app)
-    app.include_router(CreateSerializationFailureController(prefix="/serialization-examples", tags=["examples"]).router)
-
-    def override_session() -> Iterator[Session]:
-        with Session(bind=db_engine, expire_on_commit=False) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
+    app = minimal_app_factory(
+        CreateSerializationFailureController(prefix="/serialization-examples", tags=["examples"]).router
+    )
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.post(
             "/serialization-examples",
@@ -255,19 +246,13 @@ def test_create_rolls_back_when_response_serialization_fails(
 
 
 def test_update_rolls_back_when_response_serialization_fails(
-    db_engine: Engine,
     committed_session: Session,
+    minimal_app_factory: Callable[..., FastAPI],
 ) -> None:
     model = _create_example(committed_session, title="변경 전")
-    app = FastAPI()
-    register_exception_handlers(app)
-    app.include_router(UpdateSerializationFailureController(prefix="/serialization-examples", tags=["examples"]).router)
-
-    def override_session() -> Iterator[Session]:
-        with Session(bind=db_engine, expire_on_commit=False) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
+    app = minimal_app_factory(
+        UpdateSerializationFailureController(prefix="/serialization-examples", tags=["examples"]).router
+    )
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.patch(
             f"/serialization-examples/{model.id}",
@@ -299,16 +284,10 @@ def test_content_type_is_rejected_before_malformed_body(crud_client: TestClient)
     assert response.json()["errors"][0]["code"] == "UNSUPPORTED_MEDIA_TYPE"
 
 
-def test_body_bearing_delete_rejects_content_type_before_deserialization(db_engine: Engine) -> None:
-    app = FastAPI()
-    register_exception_handlers(app)
-    app.include_router(BodyDeleteController(prefix="/api/v1/examples", tags=["examples"]).router)
-
-    def override_session() -> Iterator[Session]:
-        with Session(bind=db_engine, expire_on_commit=False) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
+def test_body_bearing_delete_rejects_content_type_before_deserialization(
+    minimal_app_factory: Callable[..., FastAPI],
+) -> None:
+    app = minimal_app_factory(BodyDeleteController(prefix="/api/v1/examples", tags=["examples"]).router)
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.request(
             "DELETE",
@@ -454,7 +433,7 @@ def test_index_applies_filter_sort_page_and_returns_links(
     _create_example(committed_session, title="alpine", score=40)
 
     response = crud_client.get(
-        "/api/v1/examples?filter[title][contains]=alp&sort=-score&page[number]=1&page[size]=1",
+        "/api/v1/examples?filter[title][contains]=alp&sort=-score&page[number]=1&page[size]=1&page[totals]=true",
         headers={"Host": "evil.example"},
     )
 
@@ -507,23 +486,15 @@ def test_show_rejects_collection_only_query_parameters(
 
 
 def test_index_scope_and_model_params_are_inherited_extension_points(
-    db_engine: Engine,
     committed_session: Session,
+    minimal_app_factory: Callable[..., FastAPI],
 ) -> None:
     _create_example(committed_session, title="draft")
     active = _create_example(committed_session, title="active")
     active.status = ExampleStatus.ACTIVE
     committed_session.commit()
 
-    app = FastAPI()
-    register_exception_handlers(app)
-    app.include_router(ScopedCrudController(prefix="/scoped-examples", tags=["examples"]).router)
-
-    def override_session() -> Iterator[Session]:
-        with Session(bind=db_engine, expire_on_commit=False) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
+    app = minimal_app_factory(ScopedCrudController(prefix="/scoped-examples", tags=["examples"]).router)
     with TestClient(app, raise_server_exceptions=False) as client:
         indexed = client.get("/scoped-examples")
         created = client.post(
@@ -698,19 +669,52 @@ def test_openapi_exposes_concrete_write_document_schemas(crud_app: FastAPI) -> N
     assert set(destroy_responses["400"]["content"]) == {JSONAPI_MEDIA_TYPE}
 
 
+def test_put_is_not_registered_without_enable_upsert(
+    crud_app: FastAPI,
+    crud_client: TestClient,
+    committed_session: Session,
+) -> None:
+    """``enable_upsert`` defaults to False, so no PUT route may exist at all."""
+
+    model = _create_example(committed_session, title="업서트 없음")
+
+    response = crud_client.put(
+        f"/api/v1/examples/{model.id}",
+        headers={"Accept": JSONAPI_MEDIA_TYPE, "Content-Type": JSONAPI_MEDIA_TYPE},
+        json=_document(),
+    )
+
+    assert response.status_code == 405
+    assert "put" not in crud_app.openapi()["paths"]["/api/v1/examples/{resource_id}"]
+
+
+def test_write_operations_omit_auth_responses_without_write_dependencies(
+    crud_app: FastAPI,
+) -> None:
+    """401/403 and ``security`` are injected only when write dependencies are declared."""
+
+    paths = crud_app.openapi()["paths"]
+    write_operations = (
+        paths["/api/v1/examples"]["post"],
+        paths["/api/v1/examples/{resource_id}"]["patch"],
+        paths["/api/v1/examples/{resource_id}"]["delete"],
+        paths["/api/v1/examples/{resource_id}/relationships/tags"]["post"],
+        paths["/api/v1/examples/{resource_id}/relationships/tags"]["patch"],
+        paths["/api/v1/examples/{resource_id}/relationships/tags"]["delete"],
+    )
+
+    for operation in write_operations:
+        assert "401" not in operation["responses"]
+        assert "security" not in operation
+    assert "403" in paths["/api/v1/examples"]["post"]["responses"]
+    assert "403" not in paths["/api/v1/examples/{resource_id}"]["patch"]["responses"]
+
+
 def test_resource_routes_apply_declared_read_and_write_dependencies(
-    db_engine: Engine,
+    minimal_app_factory: Callable[..., FastAPI],
 ) -> None:
     dependency_log.clear()
-    app = FastAPI()
-    register_exception_handlers(app)
-    app.include_router(DependencyCrudController(prefix="/dependency-examples", tags=["examples"]).router)
-
-    def override_session() -> Iterator[Session]:
-        with Session(bind=db_engine, expire_on_commit=False) as session:
-            yield session
-
-    app.dependency_overrides[get_session] = override_session
+    app = minimal_app_factory(DependencyCrudController(prefix="/dependency-examples", tags=["examples"]).router)
     with TestClient(app, raise_server_exceptions=False) as client:
         read_response = client.get("/dependency-examples")
         write_response = client.post(
@@ -722,3 +726,347 @@ def test_resource_routes_apply_declared_read_and_write_dependencies(
     assert read_response.status_code == 200
     assert write_response.status_code == 201
     assert dependency_log == ["read", "write"]
+
+
+@pytest.mark.parametrize("prefix", ["examples", "/examples/", "", "/"])
+def test_validate_route_prefix_rejects_missing_leading_or_trailing_slash(prefix: str) -> None:
+    with pytest.raises(ValueError, match="route prefix must start with '/' and must not end with '/'"):
+        validate_route_prefix(prefix)
+
+
+def test_validate_route_prefix_returns_a_well_formed_prefix() -> None:
+    assert validate_route_prefix("/api/v1/examples") == "/api/v1/examples"
+
+
+@pytest.mark.parametrize("prefix", ["examples/", "", "/"])
+def test_crud_controller_construction_rejects_a_malformed_prefix(prefix: str) -> None:
+    with pytest.raises(ValueError, match="route prefix must start with '/' and must not end with '/'"):
+        ExampleCrudController(prefix=prefix, tags=["examples"])
+
+
+def test_endpoint_without_manual_state_binding_still_rolls_back_an_integrity_error(
+    committed_session: Session,
+    minimal_app_factory: Callable[..., FastAPI],
+) -> None:
+    """The session dependency binds ``request.state.session`` so endpoints cannot forget it."""
+
+    committed_session.add(ExampleCategory(name="중복 분류"))
+    committed_session.commit()
+
+    app = minimal_app_factory()
+
+    @app.post("/unbound-categories", status_code=201)
+    def create_category(session: Session = _REQUEST_SESSION_DEPENDENCY) -> Response:
+        with session.begin():
+            session.add(ExampleCategory(name="중복 분류"))
+        return Response(status_code=201)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/unbound-categories")
+
+    assert response.status_code == 409
+    assert response.headers["content-type"] == JSONAPI_MEDIA_TYPE
+    assert response.json()["errors"][0]["code"] == "RESOURCE_CONFLICT"
+    assert "uq_example_categories_name" not in response.text
+    assert "INSERT INTO" not in response.text
+    assert committed_session.scalar(select(func.count()).select_from(ExampleCategory)) == 1
+
+
+def test_request_session_dependency_publishes_the_endpoint_session_on_request_state(
+    db_engine: Engine,
+    minimal_app_factory: Callable[..., FastAPI],
+) -> None:
+    observed: dict[str, object] = {}
+
+    opened: list[Session] = []
+
+    def open_recorded_session() -> Session:
+        session = Session(bind=db_engine, expire_on_commit=False)
+        opened.append(session)
+        return session
+
+    app = minimal_app_factory(session_factory=open_recorded_session, register_handlers=False)
+
+    @app.get("/bound-session")
+    def read_session(request: Request, session: Session = _REQUEST_SESSION_DEPENDENCY) -> Response:
+        observed["state"] = request.state.session
+        observed["session"] = session
+        return Response(status_code=204)
+
+    with TestClient(app) as client:
+        assert client.get("/bound-session").status_code == 204
+
+    assert observed["state"] is opened[0]
+    assert observed["session"] is opened[0]
+
+
+@contextmanager
+def _recorded_statements(engine: Engine) -> Iterator[list[str]]:
+    """Collect every SQL statement the engine executes while the block runs.
+
+    The listener is always removed again so a leaked one cannot pollute the statement
+    counts of the next test.
+    """
+
+    statements: list[str] = []
+
+    def record(
+        connection: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del connection, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.split()))
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+
+def _selects(statements: Sequence[str]) -> list[str]:
+    return [statement for statement in statements if statement.startswith("SELECT ")]
+
+
+def _counts(statements: Sequence[str]) -> list[str]:
+    return [statement for statement in statements if "count(" in statement.lower()]
+
+
+def _link_query(link: str) -> dict[str, str]:
+    return dict(parse_qsl(urlsplit(link).query, keep_blank_values=True))
+
+
+def test_index_without_totals_executes_no_count_query(
+    crud_client: TestClient,
+    committed_session: Session,
+    db_engine: Engine,
+) -> None:
+    """A default list request must not pay for a COUNT.
+
+    Two SELECTs remain: the page itself and the ``tags`` linkage load the serializer
+    always needs. The count round trip that used to sit between them is gone.
+    """
+
+    _create_example(committed_session, title="하나")
+    _create_example(committed_session, title="둘")
+
+    with _recorded_statements(db_engine) as statements:
+        response = crud_client.get("/api/v1/examples?page[size]=1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert _counts(statements) == []
+    assert len(_selects(statements)) == 2
+    assert "meta" not in body
+    assert body["links"]["last"] is None
+    assert body["links"]["next"] is not None
+
+
+def test_index_with_page_totals_reports_total_count_and_last_link(
+    crud_client: TestClient,
+    committed_session: Session,
+    db_engine: Engine,
+) -> None:
+    for title in ("하나", "둘", "셋"):
+        _create_example(committed_session, title=title)
+
+    with _recorded_statements(db_engine) as statements:
+        response = crud_client.get("/api/v1/examples?page[size]=2&page[totals]=true")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(_counts(statements)) == 1
+    assert len(_selects(statements)) == 3
+    assert body["meta"] == {"totalCount": 3}
+    assert _link_query(body["links"]["last"])["page[number]"] == "2"
+    for link in body["links"].values():
+        assert link is None or _link_query(link)["page[totals]"] == "true"
+
+
+def test_index_cursor_pagination_walks_pages_in_both_directions(
+    crud_client: TestClient,
+    committed_session: Session,
+    db_engine: Engine,
+) -> None:
+    for index in range(5):
+        _create_example(committed_session, title=f"커서 {index}")
+
+    offset_ids = [
+        resource["id"]
+        for page_number in (1, 2, 3)
+        for resource in crud_client.get(f"/api/v1/examples?page[size]=2&page[number]={page_number}").json()["data"]
+    ]
+
+    walked: list[list[str]] = []
+    links: dict[str, str | None] = {"next": "/api/v1/examples?page[after]=&page[size]=2"}
+    with _recorded_statements(db_engine) as statements:
+        # Bounded so a cursor that fails to advance fails the test instead of hanging it.
+        for _ in range(len(offset_ids) + 1):
+            next_link = links["next"]
+            if next_link is None:
+                break
+            body = crud_client.get(next_link).json()
+            walked.append([resource["id"] for resource in body["data"]])
+            links = body["links"]
+        else:
+            pytest.fail("the cursor walk did not terminate")
+
+    assert [identifier for page in walked for identifier in page] == offset_ids
+    assert len(offset_ids) == len(set(offset_ids)) == 5
+    assert [len(page) for page in walked] == [2, 2, 1]
+    assert not any("OFFSET" in statement for statement in statements)
+    assert _counts(statements) == []
+
+    # ``last`` addresses the final window of ``page[size]`` rows, so it overlaps the
+    # forward walk's short final page rather than reproducing it.
+    last_page = [resource["id"] for resource in crud_client.get(str(links["last"])).json()["data"]]
+    assert last_page == offset_ids[-2:]
+
+    backwards: list[list[str]] = []
+    previous = links["prev"]
+    for _ in range(len(offset_ids)):
+        if previous is None:
+            break
+        body = crud_client.get(previous).json()
+        backwards.insert(0, [resource["id"] for resource in body["data"]])
+        previous = body["links"]["prev"]
+    else:
+        pytest.fail("the backwards cursor walk did not terminate")
+
+    assert backwards == walked[:-1]
+
+
+@pytest.mark.parametrize(
+    ("query", "parameter"),
+    [
+        ("page[after]=!!!", "page[after]"),
+        ("page[after]=e30", "page[after]"),
+        (
+            "sort=title&page[after]=eyJzIjpbIi1zY29yZSIsImlkIl0sInYiOlsiMSIsIjAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMSJdfQ",
+            "page[after]",
+        ),
+        ("page[after]=&page[before]=", "page[before]"),
+        ("page[after]=&page[number]=2", "page[number]"),
+        ("page[totals]=yes", "page[totals]"),
+        ("page[after]=&page[after]=", "page[after]"),
+    ],
+)
+def test_index_rejects_unauthorized_cursors_as_invalid_page(
+    crud_client: TestClient,
+    query: str,
+    parameter: str,
+) -> None:
+    response = crud_client.get(f"/api/v1/examples?{query}")
+
+    assert response.status_code == 400
+    assert response.headers["content-type"] == JSONAPI_MEDIA_TYPE
+    assert response.json()["errors"][0]["code"] == "INVALID_PAGE"
+    assert response.json()["errors"][0]["source"]["parameter"] == parameter
+
+
+class RowMultiplyingScopeController(ExampleCrudController):
+    """A read scope that joins a to-many, so the database returns one row per tag.
+
+    ``index_scope`` is the advertised read-scope extension point and nothing stops a
+    scope from multiplying rows, so the collection walk has to stay complete when one
+    does. The probe row is read before de-duplication for exactly this reason.
+    """
+
+    def index_scope(self, statement: Select[Any]) -> Select[Any]:
+        return statement.join(Example.tags)
+
+
+class _UnrepresentableSortBase(DeclarativeBase):
+    """Declarative base giving the sort gate a real, cursor-unrepresentable column type.
+
+    No application model has one, and the table is never created: a keyset cursor over
+    this sort is refused while parsing the query string, before any SQL is built.
+    """
+
+
+class _UnrepresentableSortRow(_UnrepresentableSortBase):
+    __tablename__ = "unrepresentable_sort_rows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payload: Mapped[dict[str, str]] = mapped_column(JSON, nullable=False)
+
+
+class UnrepresentableSortController(ExampleCrudController):
+    query_policy = QueryPolicy(
+        filters=EXAMPLE_QUERY_POLICY.filters,
+        sorts={**EXAMPLE_QUERY_POLICY.sorts, "payload": _UnrepresentableSortRow.payload},
+        includes=EXAMPLE_QUERY_POLICY.includes,
+        default_sort=EXAMPLE_QUERY_POLICY.default_sort,
+        tie_breaker=EXAMPLE_QUERY_POLICY.tie_breaker,
+    )
+
+
+def _walk_collection(client: TestClient, first_link: str, *, budget: int) -> list[str]:
+    seen: list[str] = []
+    link: str | None = first_link
+    for _ in range(budget):
+        if link is None:
+            return seen
+        body = client.get(link).json()
+        seen.extend(resource["id"] for resource in body["data"])
+        link = body["links"]["next"]
+    pytest.fail("the collection walk did not terminate")
+
+
+def test_index_walk_reaches_every_resource_under_a_row_multiplying_scope(
+    minimal_app_factory: Callable[..., FastAPI],
+    committed_session: Session,
+) -> None:
+    """``has_more`` must come from the raw probe, not from the de-duplicated page.
+
+    ``LIMIT size + 1`` is applied by PostgreSQL to joined rows, while ``.unique()`` folds
+    them afterwards. Judging the probe after the fold ended the walk on the first page
+    and stranded the rest of the collection.
+    """
+
+    expected: list[Example] = []
+    for index in range(6):
+        model = Example(
+            title=f"다중 {index}",
+            description=None,
+            status=ExampleStatus.DRAFT,
+            score=index,
+            tags=[ExampleTag(name=f"tag-{index}-{position}") for position in range(3)],
+        )
+        committed_session.add(model)
+        expected.append(model)
+    committed_session.commit()
+
+    app = minimal_app_factory(RowMultiplyingScopeController(prefix="/multiplied-examples", tags=["examples"]).router)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        walked = _walk_collection(client, "/multiplied-examples?page[size]=2", budget=len(expected) * 3 + 2)
+
+    assert set(walked) == {str(model.id) for model in expected}
+
+
+@pytest.mark.parametrize("parameter", ["page[after]", "page[before]"])
+def test_index_rejects_a_cursor_on_a_sort_the_codec_cannot_represent(
+    minimal_app_factory: Callable[..., FastAPI],
+    parameter: str,
+) -> None:
+    """The gate must refuse while parsing, before the page statement is ever built.
+
+    Checking only nullability admitted the boundary cursor, so the request went on to
+    query for a page whose ``next`` link ``encode_cursor`` could never mint.
+    """
+
+    app = minimal_app_factory(
+        UnrepresentableSortController(prefix="/unrepresentable-examples", tags=["examples"]).router
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get(f"/unrepresentable-examples?sort=payload&{parameter}=")
+
+    assert response.status_code == 400
+    assert response.headers["content-type"] == JSONAPI_MEDIA_TYPE
+    error = response.json()["errors"][0]
+    assert error["code"] == "INVALID_PAGE"
+    assert error["source"]["parameter"] == parameter

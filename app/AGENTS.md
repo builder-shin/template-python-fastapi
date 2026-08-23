@@ -21,7 +21,7 @@
 ## schema와 조회 정책
 
 - create, update, replace schema는 서로의 필수성 의미를 보존한다. `PATCH`는 `MISSING` 기반의 부분 갱신이고, `PUT` replace/upsert는 완전한 attributes를 받는다.
-- 쓰기 schema는 `extra="forbid"`와 camelCase alias를 유지한다. 관계 입력은 `ResourceIdentifier` linkage만 사용하며 내부 FK를 직접 공개 입력으로 만들지 않는다.
+- 쓰기 schema는 `app/jsonapi/naming.py`의 `JsonApiWriteSchema`를 상속해 `extra="forbid"`·camelCase alias·`strict=True`를 한 번에 받는다. 개별 필드에 `StrictStr`를 붙이거나 자체 `ConfigDict`를 다시 선언하지 않는다. 관계 입력은 `ResourceIdentifier` linkage만 사용하며 내부 FK를 직접 공개 입력으로 만들지 않는다.
 - `QueryPolicy`에는 실제로 지원할 filter 연산자, sort 열, include 경로, 기본 정렬과 결정적 tie breaker를 명시한다. 새로운 query parameter나 `fields[...]`는 추가하지 않는다.
 - filter parser는 저장 형식에 맞는 값을 엄격하게 변환한다. SQLAlchemy expression이나 사용자 입력 열 이름을 동적으로 조합하지 않는다.
 

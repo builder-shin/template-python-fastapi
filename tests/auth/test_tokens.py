@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import jwt
@@ -54,7 +54,7 @@ def _encode(payload: dict[str, Any], *, secret: str = SECRET, algorithm: str = "
 )
 def test_create_token_emits_all_strict_claims_with_the_configured_lifetime(
     settings: AuthSettings,
-    token_type: str,
+    token_type: Literal["access", "refresh"],
     expected_lifetime: int,
 ) -> None:
     token = create_token(
@@ -154,6 +154,22 @@ def test_decode_token_rejects_invalid_strict_claims(
         decode_token(_encode(payload), expected_type="access", settings=settings)
 
 
+def test_decode_token_rejects_a_list_audience_accepted_by_pyjwt(settings: AuthSettings) -> None:
+    payload = _valid_payload(settings)
+    payload["aud"] = [settings.audience, "other-audience"]
+
+    with pytest.raises(InvalidToken):
+        decode_token(_encode(payload), expected_type="access", settings=settings)
+
+
+def test_decode_token_rejects_a_non_string_type_claim(settings: AuthSettings) -> None:
+    payload = _valid_payload(settings)
+    payload["type"] = 123
+
+    with pytest.raises(InvalidToken):
+        decode_token(_encode(payload), expected_type="access", settings=settings)
+
+
 @pytest.mark.parametrize("missing_claim", ["sub", "jti", "type", "iat", "exp", "iss", "aud"])
 def test_decode_token_rejects_each_missing_required_claim(
     settings: AuthSettings,
@@ -245,7 +261,8 @@ def test_refresh_token_matching_uses_constant_time_comparison(
         comparisons.append((left, right))
         return left == right
 
-    monkeypatch.setattr(tokens.hmac, "compare_digest", compare_digest)
+    # app.auth.tokens re-exports hmac; strict mypy forbids implicit re-export reads.
+    monkeypatch.setattr(tokens.hmac, "compare_digest", compare_digest)  # type: ignore[attr-defined]
 
     assert refresh_token_matches("refresh-token", expected_hash) is True
     assert refresh_token_matches("wrong-token", expected_hash) is False

@@ -6,11 +6,12 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import Engine, func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.models import Example, ExampleCategory, ExampleStatus, ExampleTag
+from db import seeds as seeds_module
 from db.seeds import SEED_CATEGORY_ID, SEED_EXAMPLE_ID, SEED_TAG_ID, seed
 
 
@@ -124,3 +125,28 @@ def test_seed_does_not_hide_natural_key_conflicts(committed_session: Session) ->
         seed(committed_session)
 
     committed_session.rollback()
+
+
+def test_seed_main_runs_inside_a_factory_owned_transaction(
+    committed_session: Session,
+    db_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = sessionmaker(bind=db_engine, expire_on_commit=False)
+    monkeypatch.setattr(seeds_module, "get_session_factory", lambda: factory)
+    observed: list[Session] = []
+    original_seed = seeds_module.seed
+
+    def observing_seed(session: Session) -> None:
+        observed.append(session)
+        assert session.in_transaction()
+        original_seed(session)
+
+    monkeypatch.setattr(seeds_module, "seed", observing_seed)
+
+    seeds_module.main()
+
+    committed_session.expire_all()
+    assert _counts(committed_session) == (1, 1, 1)
+    assert len(observed) == 1
+    assert not observed[0].in_transaction()

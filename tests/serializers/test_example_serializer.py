@@ -10,12 +10,21 @@ from typing import Any, ClassVar
 from uuid import UUID
 
 import pytest
-from sqlalchemy import Engine, event, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import Engine, ForeignKey, Integer, String, and_, event, select
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    Session,
+    defer,
+    mapped_column,
+    relationship,
+    selectinload,
+)
 
 from app.models import Example, ExampleCategory, ExampleStatus, ExampleTag
 from app.serializers import (
     ExampleSerializer,
+    JsonApiSerializationError,
     JsonApiSerializer,
     RelationshipDefinition,
     build_include_tree,
@@ -394,13 +403,22 @@ def test_initialize_relationship_defaults_survives_add_and_flush(db_session: Ses
     assert resource.relationships["tags"].data == []
 
 
-@pytest.mark.parametrize("operation", ["serialize", "initialize"])
+@pytest.mark.parametrize(
+    ("operation", "unloaded_relationship"),
+    [
+        # ``serialize`` rebuilds the ``category`` linkage from the still-loaded
+        # ``category_id`` column, so ``tags`` is the relationship that must fail loudly.
+        ("serialize", "tags"),
+        ("initialize", "category"),
+    ],
+)
 @pytest.mark.parametrize("detach", [False, True], ids=["persistent", "detached"])
 def test_unloaded_relationship_fails_without_running_a_lazy_query(
     db_session: Session,
     db_engine: Engine,
     detach: bool,
     operation: str,
+    unloaded_relationship: str,
 ) -> None:
     category = ExampleCategory(name="database")
     tag = ExampleTag(name="guard")
@@ -427,7 +445,7 @@ def test_unloaded_relationship_fails_without_running_a_lazy_query(
 
     event.listen(db_engine, "before_cursor_execute", count_queries)
     try:
-        with pytest.raises(RuntimeError, match="unloaded relationship 'category'"):
+        with pytest.raises(RuntimeError, match=f"unloaded relationship '{unloaded_relationship}'"):
             if operation == "serialize":
                 ExampleSerializer.serialize(loaded)
             else:
@@ -462,6 +480,312 @@ def test_eagerly_loaded_relationships_serialize(db_session: Session) -> None:
     resource = ExampleSerializer.serialize(loaded)
 
     assert resource.id == str(model_id)
+
+
+def test_linkage_only_loader_options_skip_the_to_one_query_and_narrow_the_to_many(
+    db_session: Session,
+    db_engine: Engine,
+) -> None:
+    model_id = _persist_related_example(db_session, category_name="linkage", tag_name="linkage")
+    db_session.expunge_all()
+    statements: list[str] = []
+
+    def record(_connection: object, _cursor: object, statement: str, *_: object) -> None:
+        statements.append(statement)
+
+    event.listen(db_engine, "before_cursor_execute", record)
+    try:
+        loaded = db_session.scalars(
+            select(Example)
+            .where(Example.id == model_id)
+            .options(*ExampleSerializer.loader_options(Example, linkage_only=True))
+        ).one()
+        load_statements = list(statements)
+        resource = ExampleSerializer.serialize(loaded)
+    finally:
+        event.remove(db_engine, "before_cursor_execute", record)
+
+    assert len(load_statements) == 2
+    assert len(statements) == 2
+    assert all("categories" not in statement for statement in load_statements)
+    tag_statement = load_statements[1]
+    assert "tags.id" in tag_statement
+    assert "tags.name" not in tag_statement
+
+    db_session.expunge_all()
+    fully_loaded = db_session.scalars(
+        select(Example).where(Example.id == model_id).options(*ExampleSerializer.loader_options(Example))
+    ).one()
+    assert resource == ExampleSerializer.serialize(fully_loaded)
+
+
+def test_default_loader_options_still_load_full_related_objects(
+    db_session: Session,
+    db_engine: Engine,
+) -> None:
+    model_id = _persist_related_example(db_session, category_name="full", tag_name="full")
+    db_session.expunge_all()
+    loaded = db_session.scalars(
+        select(Example).where(Example.id == model_id).options(*ExampleSerializer.loader_options(Example))
+    ).one()
+    query_count = 0
+
+    def count_queries(*_: object) -> None:
+        nonlocal query_count
+        query_count += 1
+
+    event.listen(db_engine, "before_cursor_execute", count_queries)
+    try:
+        assert loaded.category is not None
+        assert loaded.category.name == "full"
+        assert [tag.name for tag in loaded.tags] == ["full"]
+    finally:
+        event.remove(db_engine, "before_cursor_execute", count_queries)
+
+    assert query_count == 0
+
+
+def test_unloaded_relationship_without_a_loaded_foreign_key_still_fails(
+    db_session: Session,
+    db_engine: Engine,
+) -> None:
+    model_id = _persist_related_example(db_session, category_name="deferred", tag_name="deferred")
+    db_session.expunge_all()
+    loaded = db_session.scalars(select(Example).where(Example.id == model_id).options(defer(Example.category_id))).one()
+    query_count = 0
+
+    def count_queries(*_: object) -> None:
+        nonlocal query_count
+        query_count += 1
+
+    event.listen(db_engine, "before_cursor_execute", count_queries)
+    try:
+        with pytest.raises(RuntimeError, match="unloaded relationship 'category'"):
+            ExampleSerializer.serialize(loaded)
+    finally:
+        event.remove(db_engine, "before_cursor_execute", count_queries)
+
+    assert query_count == 0
+
+
+class _NonOrmLinkageParentSerializer(JsonApiSerializer[_Parent]):
+    type_name = "parents"
+    resource_path = None
+    attributes = ()
+    relationships: ClassVar[dict[str, RelationshipDefinition]] = {
+        "child": RelationshipDefinition(
+            attribute="child",
+            serializer=_ChildSerializer,
+            many=False,
+            linkage_attribute="child_id",
+        )
+    }
+
+
+class _UnmappedStateLinkageSerializer(JsonApiSerializer[Example]):
+    type_name = "examples"
+    resource_path = None
+    attributes = ()
+    relationships: ClassVar[dict[str, RelationshipDefinition]] = {
+        "category": RelationshipDefinition(
+            attribute="category",
+            serializer=_ChildSerializer,
+            many=False,
+            linkage_attribute="missing_column",
+        )
+    }
+
+
+def test_linkage_hint_is_ignored_for_a_model_without_orm_state() -> None:
+    parent = _Parent(id=UUID(int=1), child=_Child(id=UUID(int=2)))
+
+    resource = _NonOrmLinkageParentSerializer.serialize(parent)
+
+    linkage = resource.relationships["child"].data
+    assert linkage is not None and not isinstance(linkage, list)
+    assert (linkage.type, linkage.id) == ("children", str(UUID(int=2)))
+
+
+def test_linkage_hint_naming_an_unmapped_column_falls_back_to_the_unloaded_guard(
+    db_session: Session,
+) -> None:
+    model_id = _persist_related_example(db_session, category_name="unmapped", tag_name="unmapped")
+    db_session.expunge_all()
+    loaded = db_session.scalars(select(Example).where(Example.id == model_id)).one()
+
+    with pytest.raises(JsonApiSerializationError, match="unloaded relationship 'category'"):
+        _UnmappedStateLinkageSerializer.serialize(loaded)
+
+
+class _RelationshipLinkageSerializer(JsonApiSerializer[Example]):
+    type_name = "examples"
+    resource_path = None
+    attributes = ()
+    relationships: ClassVar[dict[str, RelationshipDefinition]] = {
+        "category": RelationshipDefinition(
+            attribute="category",
+            serializer=_ChildSerializer,
+            many=False,
+            linkage_attribute="tags",
+        )
+    }
+
+
+class _BadCardinalityLinkageSerializer(JsonApiSerializer[Example]):
+    type_name = "examples"
+    resource_path = None
+    attributes = ()
+    relationships: ClassVar[dict[str, RelationshipDefinition]] = {
+        "tags": RelationshipDefinition(
+            attribute="tags",
+            serializer=_ChildSerializer,
+            many=True,
+            linkage_attribute="category_id",
+        )
+    }
+
+
+class _UnmappedLinkageSerializer(JsonApiSerializer[Example]):
+    type_name = "examples"
+    resource_path = None
+    attributes = ()
+    relationships: ClassVar[dict[str, RelationshipDefinition]] = {
+        "category": RelationshipDefinition(
+            attribute="category",
+            serializer=_ChildSerializer,
+            many=False,
+            linkage_attribute="not_a_column",
+        )
+    }
+
+
+class _WrongColumnLinkageSerializer(JsonApiSerializer[Example]):
+    type_name = "examples"
+    resource_path = None
+    attributes = ()
+    relationships: ClassVar[dict[str, RelationshipDefinition]] = {
+        "category": RelationshipDefinition(
+            attribute="category",
+            serializer=_ChildSerializer,
+            many=False,
+            linkage_attribute="score",
+        )
+    }
+
+
+@pytest.mark.parametrize(
+    ("serializer", "message"),
+    [
+        (_BadCardinalityLinkageSerializer, "only valid on a to-one relationship"),
+        (_UnmappedLinkageSerializer, "is not mapped on Example"),
+        (_WrongColumnLinkageSerializer, "is not the foreign key of 'category'"),
+        (_RelationshipLinkageSerializer, "is not a column on Example"),
+    ],
+)
+@pytest.mark.parametrize("linkage_only", [False, True], ids=["full", "linkage-only"])
+def test_linkage_attribute_must_be_the_relationship_foreign_key(
+    serializer: type[JsonApiSerializer[Example]],
+    message: str,
+    linkage_only: bool,
+) -> None:
+    with pytest.raises(JsonApiSerializationError, match=message):
+        serializer.loader_options(Example, linkage_only=linkage_only)
+
+
+class _JoinBase(DeclarativeBase):
+    """Declarative base for join shapes the application models do not contain."""
+
+
+class _JoinTarget(_JoinBase):
+    __tablename__ = "join_targets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(20), nullable=False)
+
+
+class _JoinOwner(_JoinBase):
+    __tablename__ = "join_owners"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_id: Mapped[int | None] = mapped_column(ForeignKey("join_targets.id"), nullable=True)
+
+    target: Mapped[_JoinTarget | None] = relationship(_JoinTarget, foreign_keys=[target_id])
+    kept_target: Mapped[_JoinTarget | None] = relationship(
+        _JoinTarget,
+        primaryjoin=lambda: and_(_JoinOwner.target_id == _JoinTarget.id, _JoinTarget.name == "keep"),
+        viewonly=True,
+        uselist=False,
+    )
+
+
+class _JoinTargetSerializer(JsonApiSerializer[_JoinTarget]):
+    type_name = "joinTargets"
+    resource_path = None
+    attributes = ()
+
+
+class _PlainJoinOwnerSerializer(JsonApiSerializer[_JoinOwner]):
+    type_name = "joinOwners"
+    resource_path = None
+    attributes = ()
+    relationships: ClassVar[dict[str, RelationshipDefinition]] = {
+        "target": RelationshipDefinition(
+            attribute="target",
+            serializer=_JoinTargetSerializer,
+            many=False,
+            linkage_attribute="target_id",
+        )
+    }
+
+
+class _FilteredJoinOwnerSerializer(JsonApiSerializer[_JoinOwner]):
+    type_name = "joinOwners"
+    resource_path = None
+    attributes = ()
+    relationships: ClassVar[dict[str, RelationshipDefinition]] = {
+        "keptTarget": RelationshipDefinition(
+            attribute="kept_target",
+            serializer=_JoinTargetSerializer,
+            many=False,
+            linkage_attribute="target_id",
+        )
+    }
+
+
+@pytest.mark.parametrize("linkage_only", [False, True], ids=["full", "linkage-only"])
+def test_linkage_attribute_is_refused_when_the_join_carries_extra_criteria(linkage_only: bool) -> None:
+    """The foreign key only determines linkage when it is the whole join condition.
+
+    A ``primaryjoin`` with an extra predicate leaves one local/remote pair, so the pair
+    and target-primary-key checks both pass. The shortcut would then advertise a target
+    the relationship itself excludes, making the same resource contradict itself between
+    a plain read and an ``include`` of the very same relationship.
+    """
+
+    with pytest.raises(JsonApiSerializationError, match="carries criteria beyond the foreign key"):
+        _FilteredJoinOwnerSerializer.loader_options(_JoinOwner, linkage_only=linkage_only)
+
+
+@pytest.mark.parametrize("linkage_only", [False, True], ids=["full", "linkage-only"])
+def test_linkage_attribute_is_accepted_for_a_plain_foreign_key_join(linkage_only: bool) -> None:
+    """The new check must not reject the ordinary shape it is meant to protect."""
+
+    assert _PlainJoinOwnerSerializer.loader_options(_JoinOwner, linkage_only=linkage_only) is not None
+    assert ExampleSerializer.loader_options(Example, linkage_only=linkage_only) is not None
+
+
+def _persist_related_example(session: Session, *, category_name: str, tag_name: str) -> UUID:
+    model = Example(
+        title="Related",
+        description=None,
+        status=ExampleStatus.ACTIVE,
+        score=100,
+        category=ExampleCategory(name=category_name),
+        tags=[ExampleTag(name=tag_name)],
+    )
+    session.add(model)
+    session.flush()
+    return model.id
 
 
 def _example_without_relationship_values(identifier: UUID) -> Example:

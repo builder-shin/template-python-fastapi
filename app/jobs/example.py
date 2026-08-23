@@ -8,7 +8,7 @@ from uuid import UUID
 import dramatiq
 
 from app.models import Example
-from config.database import SessionFactory
+from config.database import get_session_factory
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,8 @@ def process_example(example_id: str) -> None:
         )
         return
 
-    with SessionFactory() as session:
+    session_factory = get_session_factory()
+    with session_factory() as session:
         example = session.get(Example, parsed_id)
         if example is None:
             logger.warning(

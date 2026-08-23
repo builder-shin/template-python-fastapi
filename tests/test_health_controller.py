@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.controllers.health_controller import HealthController
 from app.jsonapi import JSONAPI_MEDIA_TYPE
 from config.database import get_session
 from config.main import create_app
@@ -18,13 +19,20 @@ from config.main import create_app
 
 @pytest.fixture
 def app() -> FastAPI:
+    """Deliberately shadow the conftest ``app`` fixture with a database-free one.
+
+    ``test_liveness_needs_no_accept_header_or_database`` asserts that liveness
+    never resolves a session, so this module must not depend on ``db_engine``
+    (which would drag the session-scoped engine and the Alembic upgrade in) and
+    must not install the conftest session overrides. The conftest ``client``
+    fixture resolves ``app`` against this module, so it stays database-free too.
+    """
+
     return create_app()
 
 
-@pytest.fixture
-def client(app: FastAPI) -> Iterator[TestClient]:
-    with TestClient(app, raise_server_exceptions=False) as test_client:
-        yield test_client
+def test_health_controller_declares_its_accept_optout_in_code() -> None:
+    assert HealthController.negotiate_accept is False
 
 
 def test_liveness_needs_no_accept_header_or_database(

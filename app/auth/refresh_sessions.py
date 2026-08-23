@@ -93,26 +93,10 @@ def rotate_refresh_session(
 ) -> AuthTokenResource | RefreshSessionError:
     """Rotate one refresh token or stage the required revocation outcome."""
 
-    claims, token_was_expired = _decode_refresh_claims(raw_token, settings)
-    if isinstance(claims, RefreshSessionError):
-        return claims
-
-    user = _lock_claimed_user(session, claims)
-    if user is None:
-        return RefreshSessionError(status_code=401, code="INVALID_TOKEN")
-
-    refresh_session = session.scalar(select(RefreshSession).where(RefreshSession.id == claims.jti).with_for_update())
-    if refresh_session is None or not _session_matches_claims(
-        refresh_session,
-        claims,
-        raw_token,
-    ):
-        return RefreshSessionError(status_code=401, code="INVALID_TOKEN")
-
-    now = datetime.now(UTC)
-    if token_was_expired or refresh_session.expires_at <= now:
-        refresh_session.revoked_at = refresh_session.revoked_at or now
-        return RefreshSessionError(status_code=401, code="TOKEN_EXPIRED")
+    verified = _load_verified_refresh_session(session, raw_token, settings)
+    if isinstance(verified, RefreshSessionError):
+        return verified
+    user, refresh_session, now = verified
 
     if refresh_session.revoked_at is not None:
         session.execute(
@@ -143,6 +127,22 @@ def logout_refresh_session(
 ) -> RefreshSessionError | None:
     """Revoke one valid refresh session while preserving idempotent logout."""
 
+    verified = _load_verified_refresh_session(session, raw_token, settings)
+    if isinstance(verified, RefreshSessionError):
+        return verified
+    _user, refresh_session, now = verified
+
+    refresh_session.revoked_at = refresh_session.revoked_at or now
+    return None
+
+
+def _load_verified_refresh_session(
+    session: Session,
+    raw_token: str,
+    settings: AuthSettings,
+) -> tuple[User, RefreshSession, datetime] | RefreshSessionError:
+    """Decode, lock and expiry-check one refresh token without owning the transaction."""
+
     claims, token_was_expired = _decode_refresh_claims(raw_token, settings)
     if isinstance(claims, RefreshSessionError):
         return claims
@@ -164,8 +164,7 @@ def logout_refresh_session(
         refresh_session.revoked_at = refresh_session.revoked_at or now
         return RefreshSessionError(status_code=401, code="TOKEN_EXPIRED")
 
-    refresh_session.revoked_at = refresh_session.revoked_at or now
-    return None
+    return user, refresh_session, now
 
 
 def _decode_refresh_claims(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from uuid import UUID
 
 from fastapi import Depends, Request
@@ -13,21 +14,27 @@ from app.auth.tokens import InvalidToken, TokenExpired, decode_token
 from app.jsonapi import JsonApiException
 from app.models import User
 from config.auth import AuthSettings, get_auth_settings
-from config.database import get_auth_session
+from config.database import get_auth_session_factory
 
 _BEARER = HTTPBearer(auto_error=False, scheme_name="BearerAuth")
 _BEARER_DEPENDENCY = Depends(_BEARER)
-_AUTH_SESSION_DEPENDENCY = Depends(get_auth_session)
+_AUTH_SESSION_FACTORY_DEPENDENCY = Depends(get_auth_session_factory)
 _AUTH_SETTINGS_DEPENDENCY = Depends(get_auth_settings)
 
 
 def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = _BEARER_DEPENDENCY,
-    session: Session = _AUTH_SESSION_DEPENDENCY,
+    session_factory: Callable[[], Session] = _AUTH_SESSION_FACTORY_DEPENDENCY,
     settings: AuthSettings = _AUTH_SETTINGS_DEPENDENCY,
 ) -> User:
-    """Return the user identified by a strict access-token bearer header."""
+    """Return the user identified by a strict access-token bearer header.
+
+    The lookup session lives only for the duration of the query: the user is
+    expunged and the session closed before the endpoint body runs, so an
+    authenticated request occupies a single pool connection at a time. The
+    returned ``User`` is therefore detached.
+    """
 
     if credentials is None:
         if request.headers.get("Authorization") is None:
@@ -62,7 +69,11 @@ def get_current_user(
             source_header="Authorization",
         ) from None
 
-    user = session.scalar(select(User).where(User.id == user_id))
+    with session_factory() as session:
+        user = session.scalar(select(User).where(User.id == user_id))
+        if user is not None:
+            session.expunge(user)
+
     if user is None:
         raise JsonApiException(
             status_code=401,

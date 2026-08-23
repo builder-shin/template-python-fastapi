@@ -9,9 +9,21 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import Engine, make_url
 
 API_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _index_names(engine: Engine, table: str) -> set[str]:
+    return {name for index in inspect(engine).get_indexes(table) if (name := index["name"]) is not None}
+
+
+def _example_index_names(engine: Engine) -> set[str]:
+    return _index_names(engine, "examples")
+
+
+def _refresh_session_index_names(engine: Engine) -> set[str]:
+    return _index_names(engine, "refresh_sessions")
 
 
 def test_upgrade_head_builds_required_tables_in_an_empty_database(
@@ -52,6 +64,16 @@ def test_upgrade_head_builds_required_tables_in_an_empty_database(
             "users",
             "refresh_sessions",
         }
+        assert "ix_examples_created_at_id" in _example_index_names(migrated_engine)
+        assert "ix_refresh_sessions_expires_at" in _refresh_session_index_names(migrated_engine)
+
+        command.downgrade(config, "20260822_0003")
+
+        assert "ix_refresh_sessions_expires_at" not in _refresh_session_index_names(migrated_engine)
+
+        command.downgrade(config, "20260715_0002")
+
+        assert "ix_examples_created_at_id" not in _example_index_names(migrated_engine)
 
         command.downgrade(config, "20260714_0001")
 
@@ -66,6 +88,7 @@ def test_upgrade_head_builds_required_tables_in_an_empty_database(
         command.upgrade(config, "head")
 
         assert {"users", "refresh_sessions"}.issubset(inspect(migrated_engine).get_table_names())
+        assert "ix_refresh_sessions_expires_at" in _refresh_session_index_names(migrated_engine)
     finally:
         migrated_engine.dispose()
         with admin_engine.connect() as connection:

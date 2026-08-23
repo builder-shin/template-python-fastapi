@@ -2,30 +2,34 @@
 
 from __future__ import annotations
 
-from enum import Enum
-from typing import cast
-
-from fastapi import APIRouter, Depends
+from fastapi import Depends
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.controllers.concerns.jsonapi_routes import JsonApiRoute
-from app.jsonapi import ErrorDocument, JsonApiException, JsonApiResponse, SuccessDocument
+from app.controllers.concerns import JsonApiController
+from app.jsonapi import JsonApiException, JsonApiResponse, SuccessDocument, jsonapi_error_responses
 from config.database import get_session
 
 _SESSION_DEPENDENCY = Depends(get_session)
 _HEALTH_DOCUMENT = SuccessDocument(data=None, meta={"status": "ok"})
 
 
-class HealthController:
-    """Expose health checks without JSON:API Accept negotiation."""
+class HealthController(JsonApiController):
+    """Expose health checks without JSON:API Accept negotiation.
+
+    Probes are polled by orchestrators that send no ``Accept`` header, so this
+    controller opts out of the shared negotiation with ``negotiate_accept``
+    instead of hand-assembling a router that merely happens to omit it. Probe
+    paths are absolute (``/health/live``, ``/health/ready``) rather than versioned
+    under a resource prefix, so it also declares ``allow_root_prefix``.
+    """
+
+    negotiate_accept = False
+    allow_root_prefix = True
 
     def __init__(self, *, tags: list[str]) -> None:
-        self.router = APIRouter(
-            tags=cast(list[str | Enum], tags),
-            route_class=JsonApiRoute,
-        )
+        super().__init__(tags=tags)
         self.router.add_api_route(
             "/health/live",
             self.live,
@@ -40,12 +44,7 @@ class HealthController:
             methods=["GET"],
             response_class=JsonApiResponse,
             response_model=SuccessDocument,
-            responses={
-                503: {
-                    "description": "JSON:API health check error",
-                    "model": ErrorDocument,
-                }
-            },
+            responses=jsonapi_error_responses(503),
             name="HealthController.ready",
         )
 

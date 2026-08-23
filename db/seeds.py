@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from app.models import Example, ExampleCategory, ExampleStatus, ExampleTag, example_tags
-from config.database import SessionFactory
+from config.database import get_session_factory
 
 SEED_CATEGORY_ID = UUID("00000000-0000-4000-8000-000000000001")
 SEED_TAG_ID = UUID("00000000-0000-4000-8000-000000000002")
@@ -76,7 +76,7 @@ def seed(session: Session) -> None:
 def main() -> None:
     """Seed the configured database from the command line."""
 
-    with SessionFactory.begin() as session:
+    with get_session_factory().begin() as session:
         seed(session)
 
 

@@ -8,6 +8,8 @@ from typing import cast
 
 from fastapi import Request
 
+from config.settings import read_int, require_env
+
 
 @dataclass(frozen=True, slots=True)
 class AuthSettings:
@@ -22,9 +24,7 @@ class AuthSettings:
 
     @classmethod
     def from_env(cls) -> AuthSettings:
-        secret_key = os.getenv("JWT_SECRET_KEY")
-        if secret_key is None:
-            raise ValueError("JWT_SECRET_KEY is required")
+        secret_key = require_env("JWT_SECRET_KEY")
         if len(secret_key.encode("utf-8")) < 32:
             raise ValueError("JWT_SECRET_KEY must be at least 32 bytes")
 
@@ -35,9 +35,9 @@ class AuthSettings:
         if not audience.strip():
             raise ValueError("JWT_AUDIENCE must not be blank")
 
-        access_expires_seconds = _read_integer("JWT_ACCESS_EXPIRES_SECONDS", 900)
-        refresh_expires_seconds = _read_integer("JWT_REFRESH_EXPIRES_SECONDS", 2_592_000)
-        leeway_seconds = _read_integer("JWT_LEEWAY_SECONDS", 0)
+        access_expires_seconds = read_int("JWT_ACCESS_EXPIRES_SECONDS", 900)
+        refresh_expires_seconds = read_int("JWT_REFRESH_EXPIRES_SECONDS", 2_592_000)
+        leeway_seconds = read_int("JWT_LEEWAY_SECONDS", 0)
         if access_expires_seconds <= 0:
             raise ValueError("JWT_ACCESS_EXPIRES_SECONDS must be greater than zero")
         if refresh_expires_seconds <= 0:
@@ -55,11 +55,25 @@ class AuthSettings:
         )
 
 
-def _read_integer(variable: str, default: int) -> int:
-    try:
-        return int(os.getenv(variable, str(default)))
-    except ValueError as error:
-        raise ValueError(f"{variable} must be an integer") from error
+@dataclass(frozen=True, slots=True)
+class RefreshSessionRetentionSettings:
+    """Retention window for the expired refresh-session purge job.
+
+    This deliberately lives outside :class:`AuthSettings` because the worker
+    process runs the purge without any JWT environment variables; folding the
+    window into ``AuthSettings.from_env`` would make the worker fail closed on a
+    missing ``JWT_SECRET_KEY`` it never uses.
+    """
+
+    retention_seconds: int = 604_800
+
+    @classmethod
+    def from_env(cls) -> RefreshSessionRetentionSettings:
+        retention_seconds = read_int("REFRESH_SESSION_RETENTION_SECONDS", 604_800)
+        if retention_seconds < 0:
+            raise ValueError("REFRESH_SESSION_RETENTION_SECONDS must be non-negative")
+
+        return cls(retention_seconds=retention_seconds)
 
 
 def get_auth_settings(request: Request) -> AuthSettings:

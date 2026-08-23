@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import get_args
 from unittest.mock import patch
 
 import pytest
@@ -13,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException
 
 from app.jsonapi import JSONAPI_MEDIA_TYPE, JsonApiException
-from app.jsonapi.errors import ERROR_CATALOG, ERROR_CODES
+from app.jsonapi.errors import ERROR_CATALOG, ERROR_CODES, ErrorCode, Language
 from app.jsonapi.exception_handlers import (
     handle_http_exception,
     handle_integrity_error,
@@ -25,32 +26,7 @@ from app.jsonapi.exception_handlers import (
 from app.jsonapi.localization import localize_error, resolve_language
 from config.main import create_app
 
-EXPECTED_ERROR_CODES = {
-    "AUTHENTICATION_REQUIRED",
-    "EMAIL_ALREADY_REGISTERED",
-    "INVALID_CREDENTIALS",
-    "INVALID_TOKEN",
-    "TOKEN_EXPIRED",
-    "TOKEN_REVOKED",
-    "USER_INACTIVE",
-    "NOT_ACCEPTABLE",
-    "UNSUPPORTED_MEDIA_TYPE",
-    "INVALID_JSONAPI_DOCUMENT",
-    "INVALID_QUERY_PARAMETER",
-    "INVALID_FILTER",
-    "INVALID_SORT",
-    "INVALID_INCLUDE",
-    "INVALID_PAGE",
-    "RESOURCE_NOT_FOUND",
-    "RELATIONSHIP_RESOURCE_NOT_FOUND",
-    "TYPE_MISMATCH",
-    "ID_MISMATCH",
-    "CLIENT_GENERATED_ID_UNSUPPORTED",
-    "RESOURCE_CONFLICT",
-    "VALIDATION_ERROR",
-    "INTERNAL_SERVER_ERROR",
-    "HTTP_ERROR",
-}
+ERROR_CODE_LITERALS: tuple[ErrorCode, ...] = get_args(ErrorCode.__value__)
 
 
 @pytest.mark.parametrize(
@@ -87,15 +63,31 @@ def test_resolve_language_honors_supported_quality_preferences(
 
 
 def test_error_catalog_has_full_design_code_parity_for_both_languages() -> None:
-    assert set(ERROR_CODES) == EXPECTED_ERROR_CODES
+    literal_codes = set(ERROR_CODE_LITERALS)
+
+    assert literal_codes
+    assert set(ERROR_CODES) == literal_codes
+    assert len(ERROR_CODES) == len(literal_codes)
     assert set(ERROR_CATALOG) == {"ko", "en"}
-    assert set(ERROR_CATALOG["ko"]) == EXPECTED_ERROR_CODES
-    assert set(ERROR_CATALOG["en"]) == EXPECTED_ERROR_CODES
+    assert set(ERROR_CATALOG["ko"]) == literal_codes
+    assert set(ERROR_CATALOG["en"]) == literal_codes
 
     for language in ("ko", "en"):
         for message in ERROR_CATALOG[language].values():
             assert message.title
             assert message.detail
+
+
+@pytest.mark.parametrize("code", ERROR_CODE_LITERALS)
+@pytest.mark.parametrize("language", ["ko", "en"])
+def test_every_error_code_localizes_in_both_languages(code: ErrorCode, language: Language) -> None:
+    # No catalog detail uses ``{}`` format placeholders, so ``detail_args`` is not needed.
+    # A future message with a placeholder must pass sample ``detail_args`` here.
+    error = localize_error(code, language=language)
+
+    assert error.code == code
+    assert error.title
+    assert error.detail
 
 
 def test_localized_error_defaults_to_korean_and_supports_safe_override() -> None:

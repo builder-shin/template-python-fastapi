@@ -5,7 +5,18 @@ from __future__ import annotations
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, Column, Enum, ForeignKey, Integer, String, Table, Text
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Table,
+    Text,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -44,7 +55,14 @@ class Example(TimestampMixin, Base):
     """Example resource used to demonstrate the API conventions."""
 
     __tablename__ = "examples"
-    __table_args__ = (CheckConstraint("score >= 0 AND score <= 100", name="score_range"),)
+    __table_args__ = (
+        CheckConstraint("score >= 0 AND score <= 100", name="score_range"),
+        # Covers the default list ordering declared by EXAMPLE_QUERY_POLICY:
+        # ``created_at DESC`` with the ``id`` tie breaker appended ascending.
+        # The per-column directions are load bearing; a plain (created_at, id)
+        # btree degrades the plan to an incremental sort.
+        Index("ix_examples_created_at_id", text("created_at DESC"), text("id")),
+    )
 
     id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),

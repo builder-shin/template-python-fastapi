@@ -1,15 +1,43 @@
-"""Starlette response for JSON:API documents."""
+"""Starlette response and OpenAPI error-response declarations for JSON:API documents."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse
 
-from app.jsonapi.documents import JsonApiDocument, RelationshipDocument
+from app.jsonapi.documents import ErrorDocument, JsonApiDocument, RelationshipDocument
 
 JSONAPI_MEDIA_TYPE = "application/vnd.api+json"
+
+ERROR_RESPONSE_DESCRIPTIONS = {
+    400: "Invalid JSON:API request",
+    401: "Authentication required",
+    403: "Forbidden",
+    404: "Resource not found",
+    406: "Not acceptable",
+    409: "Resource conflict",
+    415: "Unsupported media type",
+    422: "Validation error",
+    500: "Internal server error",
+    503: "Service unavailable",
+}
+"""Single OpenAPI description per error status, shared by every controller."""
+
+
+def jsonapi_error_responses(*status_codes: int) -> dict[int | str, dict[str, Any]]:
+    """Build the OpenAPI ``responses`` mapping for JSON:API error status codes."""
+
+    return {
+        status_code: {
+            "description": ERROR_RESPONSE_DESCRIPTIONS[status_code],
+            "model": ErrorDocument,
+        }
+        for status_code in status_codes
+    }
+
 
 _UNSAFE_REWRITTEN_RESPONSE_HEADERS = frozenset(
     {
@@ -63,9 +91,17 @@ class JsonApiResponse(JSONResponse):
         response_headers = _sanitize_rewritten_response_headers(headers)
         response_headers["Content-Type"] = JSONAPI_MEDIA_TYPE
         super().__init__(
-            content=content.model_dump(mode="json", by_alias=True, exclude_none=True),
+            content=content,
             status_code=status_code,
             headers=response_headers,
             media_type=JSONAPI_MEDIA_TYPE,
             background=background,
         )
+
+    def render(self, content: Any) -> bytes:
+        """Serialize the JSON:API document directly to bytes without an intermediate dict.
+
+        ``content`` is always a document instance because ``__init__`` accepts nothing else.
+        """
+        document: JsonApiDocument | RelationshipDocument = content
+        return document.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")

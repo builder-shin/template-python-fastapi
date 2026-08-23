@@ -54,7 +54,7 @@ def test_user_email_is_limited_to_254_characters(db_session: Session) -> None:
 
 
 def test_user_requires_a_password_hash(db_session: Session) -> None:
-    user = User(email="missing-hash@example.com", password_hash=None)  # type: ignore[arg-type]
+    user = User(email="missing-hash@example.com", password_hash=None)
     db_session.add(user)
 
     with pytest.raises(IntegrityError):
