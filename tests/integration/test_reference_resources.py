@@ -42,6 +42,39 @@ def test_categories_collection_is_sorted_by_name(
     assert all(resource["type"] == "exampleCategories" for resource in document["data"])
 
 
+def test_categories_support_explicit_sort_by_name_in_both_directions(
+    client: TestClient,
+    committed_session: Session,
+) -> None:
+    """``sort=name``/``sort=-name`` must resolve through the ``sorts`` mapping, not just
+    ``default_sort``.
+
+    Every other test in this module either relies on the default sort or ties every row's
+    ``createdAt`` to the same commit, so a typo in ``EXAMPLE_CATEGORY_QUERY_POLICY.sorts``
+    (for example mapping ``"createdAt"`` to ``ExampleCategory.name``) would go unnoticed.
+    ``name`` is unique, so both directions are fully determined by name alone — nothing here
+    depends on the ``id`` tie breaker.
+    """
+
+    _persist_reference_data(committed_session)
+
+    ascending = client.get("/api/v1/categories?sort=name", headers=HEADERS)
+    descending = client.get("/api/v1/categories?sort=-name", headers=HEADERS)
+
+    assert ascending.status_code == 200
+    assert descending.status_code == 200
+    assert [resource["attributes"]["name"] for resource in ascending.json()["data"]] == [
+        "alpha",
+        "beta",
+        "gamma",
+    ]
+    assert [resource["attributes"]["name"] for resource in descending.json()["data"]] == [
+        "gamma",
+        "beta",
+        "alpha",
+    ]
+
+
 def test_category_single_resource_carries_self_link(
     client: TestClient,
     committed_session: Session,

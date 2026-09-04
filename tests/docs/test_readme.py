@@ -173,6 +173,13 @@ def test_readme_new_resource_recipe_separates_required_from_conditional_declarat
     assert "`relationships_schema`는 쓰기 가능한 관계가 있을 때" in section
     assert "`relationships_schema`, `query_policy`가 필수" not in section
 
+    # `enable_writes` defaults to `True` on the base, so the three write schemas are only
+    # conditional for the resources that turn it off — the recipe must not list them as
+    # unconditionally required.
+    assert CrudDeclarations.enable_writes is True
+    assert "`enable_writes`" in section
+    assert "세 개의 쓰기 스키마, `query_policy`가 필수" not in section
+
 
 def test_readme_documents_full_verification_commands() -> None:
     verification = README.split("## 검증", maxsplit=1)[1]

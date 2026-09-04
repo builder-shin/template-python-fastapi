@@ -392,7 +392,7 @@ uv run alembic downgrade -1
 
 ### 5. 컨트롤러
 
-`app/controllers/api/v1/<resource>s_controller.py`에 `CrudActions`를 상속한 선언만 둡니다. `model_class`, `serializer_class`, 세 개의 쓰기 스키마, `query_policy`가 필수이고 `relationships_schema`는 쓰기 가능한 관계가 있을 때, `enable_upsert`, `enable_writes`, `write_dependencies`는 필요한 자원에만 붙입니다. 읽기 전용 자원의 기준 구현은 `app/controllers/api/v1/example_categories_controller.py`입니다. 이어서 `app/controllers/api/v1/__init__.py`의 export를 갱신합니다 — `config/routes.py`가 이 패키지에서 import하므로 빠뜨리면 등록 자체가 되지 않습니다. 기준 구현은 `app/controllers/api/v1/examples_controller.py`입니다.
+`app/controllers/api/v1/<resource>s_controller.py`에 `CrudActions`를 상속한 선언만 둡니다. `model_class`, `serializer_class`, `query_policy`가 필수이고, 세 개의 쓰기 스키마는 `enable_writes`가 참인 자원에만 필요합니다. `relationships_schema`는 쓰기 가능한 관계가 있을 때, `enable_upsert`, `enable_writes`, `write_dependencies`는 필요한 자원에만 붙입니다. 읽기 전용 자원의 기준 구현은 `app/controllers/api/v1/example_categories_controller.py`입니다. 이어서 `app/controllers/api/v1/__init__.py`의 export를 갱신합니다 — `config/routes.py`가 이 패키지에서 import하므로 빠뜨리면 등록 자체가 되지 않습니다. 기준 구현은 `app/controllers/api/v1/examples_controller.py`입니다.
 
 ### 6. 라우트 등록
 

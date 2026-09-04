@@ -162,6 +162,45 @@ def test_openapi_operation_ids_and_route_names_are_stable(app: FastAPI) -> None:
     }
 
 
+def test_reference_resource_operation_ids_and_route_names_are_stable(app: FastAPI) -> None:
+    """Pin the published operation ids for the read-only reference resources.
+
+    이 둘은 ``ExamplesController``와 같은 ``route_registrar`` 경로로 만들어지지만
+    위 테스트의 ``/api/v1/examples`` prefix 필터에 걸리지 않는다. 고정하지 않으면
+    생성기가 만드는 클라이언트 메서드 이름이 조용히 바뀐다.
+    """
+
+    schema = app.openapi()
+    reference_prefixes = ("/api/v1/categories", "/api/v1/tags")
+    operation_ids = {
+        (path, method): operation["operationId"]
+        for path, item in schema["paths"].items()
+        if path.startswith(reference_prefixes)
+        for method, operation in item.items()
+    }
+
+    assert operation_ids == {
+        ("/api/v1/categories", "get"): "ExampleCategoriesController_index_api_v1_categories_get",
+        (
+            "/api/v1/categories/{resource_id}",
+            "get",
+        ): "ExampleCategoriesController_show_api_v1_categories__resource_id__get",
+        ("/api/v1/tags", "get"): "ExampleTagsController_index_api_v1_tags_get",
+        (
+            "/api/v1/tags/{resource_id}",
+            "get",
+        ): "ExampleTagsController_show_api_v1_tags__resource_id__get",
+    }
+    assert {
+        route.name for route in app.routes if isinstance(route, APIRoute) and route.path.startswith(reference_prefixes)
+    } == {
+        "ExampleCategoriesController.index",
+        "ExampleCategoriesController.show",
+        "ExampleTagsController.index",
+        "ExampleTagsController.show",
+    }
+
+
 def test_openapi_component_schema_names_are_stable(app: FastAPI) -> None:
     """Pin the published component names for the example write schemas.
 
