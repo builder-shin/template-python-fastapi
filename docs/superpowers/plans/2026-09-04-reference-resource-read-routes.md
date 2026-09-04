@@ -16,7 +16,7 @@
 - JSON:API `type_name`은 기존 `exampleCategories`, `exampleTags`를 **바꾸지 않는다.** 이미 발행된 관계 linkage의 `type`이다.
 - 쓰기 라우트를 만들지 않는다. 관계 라우트도 만들지 않는다.
 - 조회 정책: filters `name` [`exact`, `contains`] / sorts `name`, `createdAt` / default `name ASC` / tie breaker `id ASC` / includes 없음.
-- **새 인덱스를 만들지 않는다.** `name`이 `UNIQUE`라 `(name, id)` 정렬이 기존 인덱스로 커버된다. 만들지 않기로 한 근거를 정책 선언부 주석에 남긴다 — "정렬을 여는 변경은 인덱스를 진다"는 저장소 규칙이 근거 기록을 요구한다.
+- **새 인덱스를 만들지 않는다.** 다만 근거가 "기존 인덱스로 커버된다"가 아니다 — PostgreSQL은 유니크 제약을 근거로 뒤따르는 정렬 키를 지우지 않으므로 `ORDER BY name, id`에는 incremental sort가 남는다. 만들지 않는 실제 이유는 `name`이 유니크해서 동점 그룹이 항상 1이고 참조 테이블의 행 수가 작다는 것이다. 이 근거를 정책 선언부 주석에 남긴다 — "정렬을 여는 변경은 인덱스를 진다"는 저장소 규칙이 근거 기록을 요구한다.
 - 스키마 변경이 없다. 마이그레이션을 만들지 않는다 — `categories`, `tags` 테이블은 이미 있다.
 - 등록은 전부 손으로 한다. 자동 탐색을 추가하지 않는다.
 - `fields[...]` 희소 필드셋을 추가하지 않는다.
@@ -59,7 +59,7 @@ class ReadOnlyExampleController(CrudActions[Example, BaseModel, BaseModel, BaseM
     enable_writes = False
 ```
 
-같은 파일 맨 끝에 테스트를 추가한다.
+같은 파일 맨 끝에 테스트를 추가한다. `APIRoute` import가 없으므로 파일 상단의 `from fastapi.testclient import TestClient` 아래에 `from fastapi.routing import APIRoute`를 더한다 — `route.methods`는 `BaseRoute`에 없어서 좁히지 않으면 mypy strict가 막는다. `# type: ignore`를 쓰지 않는 이유는 strict의 `warn_unused_ignores` 때문이다.
 
 ```python
 def test_read_only_controller_registers_only_read_routes() -> None:
@@ -68,7 +68,8 @@ def test_read_only_controller_registers_only_read_routes() -> None:
     registered = {
         (route.path, method)
         for route in controller.router.routes
-        for method in route.methods  # type: ignore[attr-defined]
+        if isinstance(route, APIRoute)
+        for method in route.methods
     }
 
     assert registered == {
@@ -95,7 +96,8 @@ def test_write_controller_still_registers_every_route() -> None:
     methods = {
         (route.path, method)
         for route in controller.router.routes
-        for method in route.methods  # type: ignore[attr-defined]
+        if isinstance(route, APIRoute)
+        for method in route.methods
     }
 
     assert ("/api/v1/examples", "POST") in methods
@@ -154,8 +156,13 @@ def register_resource_routes(
 ```python
     # POST는 GET ""과 GET "/{resource_id}" 사이에 있어야 한다 — 이 순서가
     # OpenAPI 문서의 operation 순서를 정하므로 재배치하지 않는다.
+    #
+    # 스키마 None 검사를 assert가 아니라 raise로 쓰는 이유: `app/`에는 assert 선례가
+    # 없고, `python -O`가 assert를 지운다. 검사 자체는 mypy strict가 요구한다 —
+    # 인자가 `| None`이므로 좁히지 않으면 델리게이트에 넘길 수 없다.
     if enable_writes:
-        assert create_document_schema is not None
+        if create_document_schema is None:
+            raise ValueError("write routes require a create document schema")
         router.add_api_route(
             "",
             _create_delegate(controller_name, create, create_document_schema),
@@ -173,8 +180,8 @@ def register_resource_routes(
 
 ```python
     if enable_writes:
-        assert update_document_schema is not None
-        assert replace_document_schema is not None
+        if update_document_schema is None or replace_document_schema is None:
+            raise ValueError("write routes require update and replace document schemas")
         router.add_api_route(
             "/{resource_id}",
             _write_delegate(f"{controller_name}_update", update, update_document_schema),
@@ -493,7 +500,8 @@ def test_reference_resource_controllers_are_read_only() -> None:
         methods = {
             method
             for route in controller.router.routes
-            for method in route.methods  # type: ignore[attr-defined]
+            if isinstance(route, APIRoute)
+            for method in route.methods
         }
         assert methods == {"GET"}
 ```
@@ -534,15 +542,22 @@ EXAMPLE_CATEGORY_QUERY_POLICY = QueryPolicy(
 )
 """Read-only query allowlist for example categories.
 
-**인덱스 판단.** 모든 정렬 뒤에 ``id ASC``가 붙으므로 유용한 인덱스는
-``(<컬럼>, id)``다. ``name``은 ``UNIQUE``라 이미 인덱스가 있고, 그 인덱스가
-``(name, id)`` 정렬을 이끈다 — 새 인덱스를 **만들지 않는다**. ``createdAt``
-정렬에도 인덱스를 만들지 않는다: 참조 데이터는 행 수가 적어(분류 소수, 라벨
-소수) 플래너가 순차 스캔을 골라도 비용이 낮다. 행 수가 크게 늘고 ``createdAt``
-정렬이 주된 부하가 되면 그때 ``(created_at, id)``를 같은 규칙으로 판단해
-추가한다.
+**인덱스 판단 — 만들지 않는다.** 정본의 Example 정책과 달리 여기서는 정렬이
+인덱스로 완전히 커버되지 **않는다**. `name`의 UNIQUE 인덱스가 `name` 순서를
+주지만, PostgreSQL은 유니크 제약을 근거로 뒤따르는 정렬 키를 지우지 않으므로
+`ORDER BY name, id` 계획에는 incremental sort가 남는다.
 
-``includes``가 비어 있는 것도 의도된 것이다. ``examples`` 역참조를 열면
+그럼에도 `(name, id)` 인덱스를 만들지 않는 이유는 둘이다. `name`이 유니크해서
+동점 그룹의 크기가 항상 1이라 그 정렬 단계가 실질적으로 하는 일이 없고, 참조
+테이블의 행 수가 작다(분류·라벨 각각 수십 개 규모). `createdAt` 정렬도 같은
+이유로 인덱스를 만들지 않는다. 행 수가 크게 늘어 이 목록이 주된 부하가 되면
+그때 `(name, id)`를 같은 규칙으로 판단해 추가한다.
+
+**`tests/integration/test_query_indexes.py`의 Example 테스트를 이 자원에 복사하지
+않는다.** 그 테스트는 계획에 `Sort` 노드가 없음을 단언하는데, 위 이유로 여기서는
+그 단언이 참이 아니다.
+
+`includes`가 비어 있는 것도 의도된 것이다. `examples` 역참조를 열면
 Example → category → examples → … 로 순환이 생긴다.
 """
 ```
@@ -573,24 +588,47 @@ EXAMPLE_TAG_QUERY_POLICY = QueryPolicy(
 )
 """Read-only query allowlist for example tags.
 
-**인덱스 판단.** ``name``이 ``UNIQUE``라 이미 인덱스가 있고 그 인덱스가
-``(name, id)`` 정렬을 이끈다 — 새 인덱스를 **만들지 않는다**. ``createdAt``도
-같은 이유로 만들지 않는다: 라벨 수가 적어 순차 스캔의 비용이 낮다.
+**인덱스 판단 — 만들지 않는다.** 근거는 `EXAMPLE_CATEGORY_QUERY_POLICY`와 같다.
+`name`의 UNIQUE 인덱스가 `name` 순서를 주지만 `ORDER BY name, id`에는 incremental
+sort가 남는다. `name`이 유니크해서 동점 그룹이 항상 1이고 라벨 수가 적으므로
+`(name, id)` 인덱스를 만들지 않는다. `createdAt`도 같다.
 
-``includes``가 비어 있는 것은 ``examples`` 역참조가 순환을 만들기 때문이다.
+`includes`가 비어 있는 것은 `examples` 역참조가 순환을 만들기 때문이다.
 """
 ```
 
 - [ ] **Step 4: 스키마 패키지에서 내보낸다**
 
-`app/schemas/__init__.py`에 두 정책을 추가한다. 기존 import 줄들 아래에 더하고 `__all__`에도 넣는다.
+`app/schemas/__init__.py`를 아래 내용으로 바꾼다. import 줄과 `__all__` 모두 ruff의 정렬 규칙(`I`)을 따른 순서다.
 
 ```python
+"""Validated API input schemas."""
+
+from app.schemas.auth import LoginDocument, RefreshTokenDocument, RegisterDocument, normalize_email
+from app.schemas.example import (
+    EXAMPLE_QUERY_POLICY,
+    ExampleCreate,
+    ExampleRelationships,
+    ExampleReplace,
+    ExampleUpdate,
+)
 from app.schemas.example_category import EXAMPLE_CATEGORY_QUERY_POLICY
 from app.schemas.example_tag import EXAMPLE_TAG_QUERY_POLICY
-```
 
-`__all__`에 `"EXAMPLE_CATEGORY_QUERY_POLICY"`, `"EXAMPLE_TAG_QUERY_POLICY"`를 알파벳 순서에 맞게 넣는다.
+__all__ = [
+    "EXAMPLE_CATEGORY_QUERY_POLICY",
+    "EXAMPLE_QUERY_POLICY",
+    "EXAMPLE_TAG_QUERY_POLICY",
+    "ExampleCreate",
+    "ExampleRelationships",
+    "ExampleReplace",
+    "ExampleUpdate",
+    "LoginDocument",
+    "RefreshTokenDocument",
+    "RegisterDocument",
+    "normalize_email",
+]
+```
 
 - [ ] **Step 5: 컨트롤러를 쓴다**
 
@@ -758,8 +796,12 @@ GET /api/v1/categories와 GET /api/v1/tags를 연다. 분류와 라벨이 Exampl
 관계로만 노출되어 있어서 폼의 관계 선택기가 고를 목록을 가져올 곳이 없었다.
 
 정렬 기본값은 name ASC다. 참조 데이터는 최신순으로 고르지 않는다.
-name이 UNIQUE라 (name, id) 정렬이 기존 인덱스로 커버되므로 새 인덱스를
-만들지 않는다 — 근거를 정책 선언부에 남겼다."
+
+새 인덱스는 만들지 않는다. name의 UNIQUE 인덱스가 name 순서를 주지만
+ORDER BY name, id를 완전히 커버하지는 않는다 — PostgreSQL은 유니크 제약을
+근거로 뒤따르는 정렬 키를 지우지 않는다. 그래도 만들지 않는 이유는 동점
+그룹이 항상 1이고 참조 테이블의 행 수가 작기 때문이며, 그 판단을 정책
+선언부 주석에 남겼다."
 ```
 
 ---
@@ -860,7 +902,7 @@ def test_categories_walk_the_whole_collection_by_cursor(
     _persist_reference_data(committed_session)
 
     seen: list[str] = []
-    url = "/api/v1/categories?page[size]=2&page[after]="
+    url: str | None = "/api/v1/categories?page[size]=2&page[after]="
     while url is not None:
         document = client.get(url, headers=HEADERS).json()
         seen.extend(resource["attributes"]["name"] for resource in document["data"])
@@ -954,16 +996,29 @@ curl --globoff -fsS \
 ```
 ```
 
-- [ ] **Step 4: `app/AGENTS.md`에 읽기 전용 옵션을 적는다**
+- [ ] **Step 4: `enable_writes`를 `enable_upsert`가 적힌 세 곳 모두에 적는다**
 
-`app/AGENTS.md`의 컨트롤러 선언 규칙을 다루는 절에 한 문단을 더한다.
+`enable_upsert`는 저장소의 세 곳에 문서화되어 있다. 새 옵션도 같은 세 곳에 들어가야 한 곳만 알고 나머지는 모르는 상태가 되지 않는다.
+
+**(1) `app/AGENTS.md:33`** — 지금 "세 write schema"를 무조건 선언한다고 쓰여 있어 읽기 전용 자원에서는 거짓이 된다. 그 줄 끝에 이어 붙인다.
 
 ```markdown
-- 참조 데이터처럼 서버가 관리하는 자원은 `enable_writes = False`를 선언한다.
-  쓰기 라우트와 관계 mutation 라우트가 등록되지 않고, `create_schema`·
-  `update_schema`·`replace_schema`를 선언하지 않아도 된다. 제네릭 인자는
-  `CrudActions[Model, BaseModel, BaseModel, BaseModel]`로 묶는다.
+`enable_writes = False`는 참조 데이터처럼 서버가 관리하는 자원에 둔다 — 쓰기 라우트와 관계 mutation 라우트가 등록되지 않고, 세 write schema를 선언하지 않아도 된다. 제네릭 인자는 `CrudActions[Model, BaseModel, BaseModel, BaseModel]`로 묶는다.
 ```
+
+**(2) `app/controllers/concerns/AGENTS.md:36`** — 라우트 등록 동작을 설명하는 줄이다. 뒤에 한 문장을 더한다.
+
+```markdown
+`enable_writes = False`이면 create/update/upsert/destroy와 관계 mutation 라우트를 아예 등록하지 않고 읽기 라우트만 남긴다.
+```
+
+**(3) `README.md:374`** — "새 자원 추가" 안내다. `enable_upsert`와 `write_dependencies`를 나열하는 자리에 `enable_writes`를 더한다.
+
+```markdown
+`enable_upsert`, `enable_writes`, `write_dependencies`는 필요한 자원에만 붙입니다. 읽기 전용 자원의 기준 구현은 `app/controllers/api/v1/example_categories_controller.py`입니다.
+```
+
+> `tests/docs/test_agents_guides.py`는 `concerns/AGENTS.md`·`jsonapi/AGENTS.md`·`tests/controllers/AGENTS.md`만 고정하며, 위 세 편집 중 어느 것도 그 단언과 충돌하지 않는다. `tests/docs/test_readme.py`는 인증 관련 문구만 고정한다.
 
 - [ ] **Step 5: 전체 게이트를 돌린다**
 
