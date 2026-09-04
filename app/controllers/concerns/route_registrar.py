@@ -62,6 +62,7 @@ def register_resource_routes(
     controller_name: str,
     read_dependencies: Sequence[Callable[..., Any]],
     write_dependencies: Sequence[Callable[..., Any]],
+    enable_writes: bool,
     enable_upsert: bool,
     index: IndexAction,
     show: ShowAction,
@@ -69,9 +70,9 @@ def register_resource_routes(
     update: WriteAction,
     upsert: WriteAction,
     destroy: DestroyAction,
-    create_document_schema: type[BaseModel],
-    update_document_schema: type[BaseModel],
-    replace_document_schema: type[BaseModel],
+    create_document_schema: type[BaseModel] | None,
+    update_document_schema: type[BaseModel] | None,
+    replace_document_schema: type[BaseModel] | None,
 ) -> None:
     """Register the collection and single-resource routes in document order."""
 
@@ -85,17 +86,26 @@ def register_resource_routes(
         dependencies=[Depends(dependency) for dependency in read_dependencies],
         name=f"{controller_name}.index",
     )
-    router.add_api_route(
-        "",
-        _create_delegate(controller_name, create, create_document_schema),
-        methods=["POST"],
-        response_class=JsonApiResponse,
-        response_model=SuccessDocument,
-        status_code=201,
-        responses=_write_error_responses(write_dependencies, 400, 403, 406, 409, 415, 422, 500),
-        dependencies=[Depends(dependency) for dependency in write_dependencies],
-        name=f"{controller_name}.create",
-    )
+    # POST는 GET ""과 GET "/{resource_id}" 사이에 있어야 한다 — 이 순서가
+    # OpenAPI 문서의 operation 순서를 정하므로 재배치하지 않는다.
+    #
+    # 스키마 None 검사를 assert가 아니라 raise로 쓰는 이유: `app/`에는 assert 선례가
+    # 없고, `python -O`가 assert를 지운다. 검사 자체는 mypy strict가 요구한다 —
+    # 인자가 `| None`이므로 좁히지 않으면 델리게이트에 넘길 수 없다.
+    if enable_writes:
+        if create_document_schema is None:
+            raise ValueError("write routes require a create document schema")
+        router.add_api_route(
+            "",
+            _create_delegate(controller_name, create, create_document_schema),
+            methods=["POST"],
+            response_class=JsonApiResponse,
+            response_model=SuccessDocument,
+            status_code=201,
+            responses=_write_error_responses(write_dependencies, 400, 403, 406, 409, 415, 422, 500),
+            dependencies=[Depends(dependency) for dependency in write_dependencies],
+            name=f"{controller_name}.create",
+        )
     router.add_api_route(
         "/{resource_id}",
         _show_delegate(controller_name, show),
@@ -106,49 +116,52 @@ def register_resource_routes(
         dependencies=[Depends(dependency) for dependency in read_dependencies],
         name=f"{controller_name}.show",
     )
-    router.add_api_route(
-        "/{resource_id}",
-        _write_delegate(f"{controller_name}_update", update, update_document_schema),
-        methods=["PATCH"],
-        response_class=JsonApiResponse,
-        response_model=SuccessDocument,
-        responses=_write_error_responses(write_dependencies, 400, 404, 406, 409, 415, 422, 500),
-        dependencies=[Depends(dependency) for dependency in write_dependencies],
-        name=f"{controller_name}.update",
-    )
-    if enable_upsert:
+    if enable_writes:
+        if update_document_schema is None or replace_document_schema is None:
+            raise ValueError("write routes require update and replace document schemas")
         router.add_api_route(
             "/{resource_id}",
-            _write_delegate(f"{controller_name}_upsert", upsert, replace_document_schema),
-            methods=["PUT"],
+            _write_delegate(f"{controller_name}_update", update, update_document_schema),
+            methods=["PATCH"],
             response_class=JsonApiResponse,
             response_model=SuccessDocument,
-            responses={
-                201: {
-                    "description": "Resource created",
-                    "model": SuccessDocument,
-                    "headers": {
-                        "Location": {
-                            "description": "Canonical URL of the created resource",
-                            "schema": {"type": "string"},
-                        }
-                    },
-                },
-                **_write_error_responses(write_dependencies, 400, 404, 406, 409, 415, 422, 500),
-            },
+            responses=_write_error_responses(write_dependencies, 400, 404, 406, 409, 415, 422, 500),
             dependencies=[Depends(dependency) for dependency in write_dependencies],
-            name=f"{controller_name}.upsert",
+            name=f"{controller_name}.update",
         )
-    router.add_api_route(
-        "/{resource_id}",
-        _destroy_delegate(controller_name, destroy),
-        methods=["DELETE"],
-        status_code=204,
-        response_class=JsonApiResponse,
-        responses=_write_error_responses(write_dependencies, 400, 404, 406, 422, 500),
-        dependencies=[Depends(dependency) for dependency in write_dependencies],
-        name=f"{controller_name}.destroy",
-    )
+        if enable_upsert:
+            router.add_api_route(
+                "/{resource_id}",
+                _write_delegate(f"{controller_name}_upsert", upsert, replace_document_schema),
+                methods=["PUT"],
+                response_class=JsonApiResponse,
+                response_model=SuccessDocument,
+                responses={
+                    201: {
+                        "description": "Resource created",
+                        "model": SuccessDocument,
+                        "headers": {
+                            "Location": {
+                                "description": "Canonical URL of the created resource",
+                                "schema": {"type": "string"},
+                            }
+                        },
+                    },
+                    **_write_error_responses(write_dependencies, 400, 404, 406, 409, 415, 422, 500),
+                },
+                dependencies=[Depends(dependency) for dependency in write_dependencies],
+                name=f"{controller_name}.upsert",
+            )
+        router.add_api_route(
+            "/{resource_id}",
+            _destroy_delegate(controller_name, destroy),
+            methods=["DELETE"],
+            status_code=204,
+            response_class=JsonApiResponse,
+            responses=_write_error_responses(write_dependencies, 400, 404, 406, 422, 500),
+            dependencies=[Depends(dependency) for dependency in write_dependencies],
+            name=f"{controller_name}.destroy",
+        )
 
 
 def register_relationship_routes(

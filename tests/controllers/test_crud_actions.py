@@ -11,6 +11,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import Body, Depends, FastAPI, Request
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import JSON, Engine, Integer, Select, event, func, select
@@ -73,6 +74,20 @@ class RollbackController(ExampleCrudController):
     def after_create(self, session: Session, model: Example, attributes: ExampleCreate) -> None:
         super().after_create(session, model, attributes)
         raise JsonApiException(status_code=422, code="VALIDATION_ERROR")
+
+
+class ReadOnlyExampleController(CrudActions[Example, BaseModel, BaseModel, BaseModel]):
+    """쓰기 스키마를 하나도 선언하지 않는 읽기 전용 컨트롤러.
+
+    ``relationships_schema``를 일부러 선언한다 — ``enable_writes = False``가
+    관계 쓰기 라우트까지 막지 못하면 이 선언이 그 구멍을 드러낸다.
+    """
+
+    model_class = Example
+    serializer_class = ExampleSerializer
+    relationships_schema = ExampleRelationships
+    query_policy = EXAMPLE_QUERY_POLICY
+    enable_writes = False
 
 
 class CreateSerializationFailureController(ExampleCrudController):
@@ -1070,3 +1085,47 @@ def test_index_rejects_a_cursor_on_a_sort_the_codec_cannot_represent(
     error = response.json()["errors"][0]
     assert error["code"] == "INVALID_PAGE"
     assert error["source"]["parameter"] == parameter
+
+
+def test_read_only_controller_registers_only_read_routes() -> None:
+    controller = ReadOnlyExampleController(prefix="/api/v1/examples", tags=["examples"])
+
+    registered = {
+        (route.path, method)
+        for route in controller.router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods
+    }
+
+    assert registered == {
+        ("/api/v1/examples", "GET"),
+        ("/api/v1/examples/{resource_id}", "GET"),
+        ("/api/v1/examples/{resource_id}/relationships/category", "GET"),
+        ("/api/v1/examples/{resource_id}/category", "GET"),
+        ("/api/v1/examples/{resource_id}/relationships/tags", "GET"),
+        ("/api/v1/examples/{resource_id}/tags", "GET"),
+    }
+
+
+def test_read_only_controller_has_no_writable_relationship_names() -> None:
+    controller = ReadOnlyExampleController(prefix="/api/v1/examples", tags=["examples"])
+
+    # 선언된 relationships_schema가 있어도 비어 있어야 한다. 비어 있지 않으면
+    # register_relationship_routes가 mutation 라우트를 등록한다.
+    assert controller._writable_relationship_names == frozenset()
+
+
+def test_write_controller_still_registers_every_route() -> None:
+    controller = ExampleCrudController(prefix="/api/v1/examples", tags=["examples"])
+
+    methods = {
+        (route.path, method)
+        for route in controller.router.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods
+    }
+
+    assert ("/api/v1/examples", "POST") in methods
+    assert ("/api/v1/examples/{resource_id}", "PATCH") in methods
+    assert ("/api/v1/examples/{resource_id}", "DELETE") in methods
+    assert ("/api/v1/examples/{resource_id}/relationships/tags", "POST") in methods
