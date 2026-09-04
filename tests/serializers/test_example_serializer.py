@@ -215,7 +215,7 @@ def test_include_deduplicates_resources_and_preserves_first_seen_order(example: 
     assert len(keys) == len(set(keys))
 
 
-def test_auxiliary_included_resources_have_only_type_id_and_name(example: Example) -> None:
+def test_auxiliary_included_resources_expose_type_id_name_and_self_link(example: Example) -> None:
     document = ExampleSerializer.document(example, include=("category", "tags"))
 
     assert [item.model_dump(mode="json") for item in document.included] == [
@@ -223,11 +223,13 @@ def test_auxiliary_included_resources_have_only_type_id_and_name(example: Exampl
             "type": "exampleCategories",
             "id": str(UUID(int=10)),
             "attributes": {"name": "examples"},
+            "links": {"self": f"/api/v1/categories/{UUID(int=10)}"},
         },
         {
             "type": "exampleTags",
             "id": str(UUID(int=20)),
             "attributes": {"name": "filing"},
+            "links": {"self": f"/api/v1/tags/{UUID(int=20)}"},
         },
     ]
 
@@ -798,3 +800,14 @@ def _example_without_relationship_values(identifier: UUID) -> Example:
         created_at=datetime(2026, 7, 14, tzinfo=UTC),
         updated_at=datetime(2026, 7, 14, tzinfo=UTC),
     )
+
+
+def test_included_reference_resources_carry_self_links(example: Example) -> None:
+    document = ExampleSerializer.document(example, include=("category", "tags"))
+
+    links = {item.type: item.links["self"] for item in document.included}
+
+    assert links == {
+        "exampleCategories": f"/api/v1/categories/{UUID(int=10)}",
+        "exampleTags": f"/api/v1/tags/{UUID(int=20)}",
+    }

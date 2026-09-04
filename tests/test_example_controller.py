@@ -888,11 +888,13 @@ def test_include_category_and_tags_document_is_unchanged(
             "type": "exampleCategories",
             "id": str(category.id),
             "attributes": {"name": category.name},
+            "links": {"self": f"/api/v1/categories/{category.id}"},
         },
         {
             "type": "exampleTags",
             "id": str(tag.id),
             "attributes": {"name": tag.name},
+            "links": {"self": f"/api/v1/tags/{tag.id}"},
         },
     ]
 
@@ -903,6 +905,7 @@ def test_include_category_and_tags_document_is_unchanged(
             "type": "exampleCategories",
             "id": str(category.id),
             "attributes": {"name": category.name},
+            "links": {"self": f"/api/v1/categories/{category.id}"},
         }
     ]
 
