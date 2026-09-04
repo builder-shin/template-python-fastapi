@@ -68,6 +68,10 @@ def test_openapi_exposes_only_declared_application_operations(app: FastAPI) -> N
             "delete",
         },
         "/api/v1/examples/{resource_id}/tags": {"get"},
+        "/api/v1/categories": {"get"},
+        "/api/v1/categories/{resource_id}": {"get"},
+        "/api/v1/tags": {"get"},
+        "/api/v1/tags/{resource_id}": {"get"},
         "/health/live": {"get"},
         "/health/ready": {"get"},
     }
@@ -327,6 +331,10 @@ def test_application_exposes_only_explicitly_composed_routes(app: FastAPI) -> No
         "/api/v1/examples/{resource_id}/category",
         "/api/v1/examples/{resource_id}/relationships/tags",
         "/api/v1/examples/{resource_id}/tags",
+        "/api/v1/categories",
+        "/api/v1/categories/{resource_id}",
+        "/api/v1/tags",
+        "/api/v1/tags/{resource_id}",
         "/health/live",
         "/health/ready",
     }

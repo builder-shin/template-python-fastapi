@@ -2,15 +2,25 @@
 
 from fastapi import APIRouter
 
-from app.controllers.api.v1 import AuthController, ExamplesController, UsersController
+from app.controllers.api.v1 import (
+    AuthController,
+    ExampleCategoriesController,
+    ExamplesController,
+    ExampleTagsController,
+    UsersController,
+)
 from app.controllers.health_controller import HealthController
 
 api_router = APIRouter()
 auth_controller = AuthController(prefix="/api/v1/auth", tags=["authentication"])
 examples_controller = ExamplesController(prefix="/api/v1/examples", tags=["examples"])
+example_categories_controller = ExampleCategoriesController(prefix="/api/v1/categories", tags=["example categories"])
+example_tags_controller = ExampleTagsController(prefix="/api/v1/tags", tags=["example tags"])
 health_controller = HealthController(tags=["health"])
 users_controller = UsersController(prefix="/api/v1/users", tags=["users"])
 api_router.include_router(auth_controller.router)
 api_router.include_router(examples_controller.router)
+api_router.include_router(example_categories_controller.router)
+api_router.include_router(example_tags_controller.router)
 api_router.include_router(health_controller.router)
 api_router.include_router(users_controller.router)
