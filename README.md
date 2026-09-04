@@ -268,6 +268,27 @@ Example 읽기 요청은 공개되어 있고 Example 쓰기 요청과 관계 변
 | `DELETE` | `/api/v1/examples/{id}/relationships/tags` | tags linkage 제거 |
 | `GET` | `/api/v1/examples/{id}/tags` | 연결된 tag 리소스 조회 |
 
+## 참조 자원
+
+분류와 라벨은 읽기 전용 컬렉션으로도 조회할 수 있습니다. 관계 선택기처럼
+고를 목록이 필요한 화면을 위한 것이며, 쓰기 라우트는 없습니다.
+
+```text
+GET /api/v1/categories       filter[name] · sort=name,createdAt · page[...]
+GET /api/v1/categories/{id}
+GET /api/v1/tags
+GET /api/v1/tags/{id}
+```
+
+기본 정렬은 `name` 오름차순입니다. JSON:API 자원 타입은 각각
+`exampleCategories`와 `exampleTags`로, URL 경로와 다릅니다.
+
+```bash
+curl --globoff -fsS \
+  -H 'Accept: application/vnd.api+json' \
+  'http://localhost:4000/api/v1/categories?filter[name][contains]=문서'
+```
+
 ## 조회 파라미터
 
 - 필터: `filter[status]=active`, `filter[score][gte]=80`, `filter[title][contains]=예시`
@@ -371,7 +392,7 @@ uv run alembic downgrade -1
 
 ### 5. 컨트롤러
 
-`app/controllers/api/v1/<resource>s_controller.py`에 `CrudActions`를 상속한 선언만 둡니다. `model_class`, `serializer_class`, 세 개의 쓰기 스키마, `query_policy`가 필수이고 `relationships_schema`는 쓰기 가능한 관계가 있을 때, `enable_upsert`와 `write_dependencies`는 필요한 자원에만 붙입니다. 이어서 `app/controllers/api/v1/__init__.py`의 export를 갱신합니다 — `config/routes.py`가 이 패키지에서 import하므로 빠뜨리면 등록 자체가 되지 않습니다. 기준 구현은 `app/controllers/api/v1/examples_controller.py`입니다.
+`app/controllers/api/v1/<resource>s_controller.py`에 `CrudActions`를 상속한 선언만 둡니다. `model_class`, `serializer_class`, 세 개의 쓰기 스키마, `query_policy`가 필수이고 `relationships_schema`는 쓰기 가능한 관계가 있을 때, `enable_upsert`, `enable_writes`, `write_dependencies`는 필요한 자원에만 붙입니다. 읽기 전용 자원의 기준 구현은 `app/controllers/api/v1/example_categories_controller.py`입니다. 이어서 `app/controllers/api/v1/__init__.py`의 export를 갱신합니다 — `config/routes.py`가 이 패키지에서 import하므로 빠뜨리면 등록 자체가 되지 않습니다. 기준 구현은 `app/controllers/api/v1/examples_controller.py`입니다.
 
 ### 6. 라우트 등록
 
