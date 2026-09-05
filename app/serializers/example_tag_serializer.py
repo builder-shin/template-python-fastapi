@@ -8,5 +8,5 @@ class ExampleTagSerializer(JsonApiSerializer[ExampleTag]):
     """Expose the public example-tag representation."""
 
     type_name = "exampleTags"
-    resource_path = None
+    resource_path = "/api/v1/tags"
     attributes = ("name",)

@@ -39,14 +39,22 @@ class CrudDeclarations[
     replace_schema: type[ReplaceT]
     relationships_schema: type[BaseModel] | None = None
     query_policy: QueryPolicy
+    enable_writes = True
+    """쓰기 라우트를 등록할지 여부.
+
+    ``False``면 create/update/upsert/destroy와 관계 mutation 라우트가 등록되지
+    않고, ``create_schema``·``update_schema``·``replace_schema``를 선언하지 않아도
+    된다. 참조 데이터처럼 서버가 관리하는 자원을 위한 것이다.
+    """
     enable_upsert = False
     read_dependencies: tuple[Callable[..., Any], ...] = ()
     write_dependencies: tuple[Callable[..., Any], ...] = ()
 
-    # Built once by ``CrudActions.__init__`` and read by the layers above.
-    _create_document_schema: type[BaseModel]
-    _update_document_schema: type[BaseModel]
-    _replace_document_schema: type[BaseModel]
+    # Built once by ``CrudActions.__init__`` and read by the layers above. ``None`` when
+    # ``enable_writes`` is ``False``.
+    _create_document_schema: type[BaseModel] | None
+    _update_document_schema: type[BaseModel] | None
+    _replace_document_schema: type[BaseModel] | None
     _writable_relationship_names: frozenset[str]
     _relationship_document_schemas: Mapping[str, type[BaseModel]]
 

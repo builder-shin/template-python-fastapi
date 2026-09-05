@@ -30,7 +30,7 @@
 - serializer는 선언한 attributes와 `RelationshipDefinition`만 직렬화한다. 공개 관계에는 대상 serializer와 cardinality를 명시해 linkage와 compound `included` 문서를 일관되게 만든다.
 - serializer의 `resource_path`는 `config/routes.py`에서 controller를 조립할 때 쓰는 prefix와 정확히 같아야 한다. 이 값이 resource·relationship link와 POST·PUT의 `Location` 기준이므로, 한쪽만 바꾸지 않는다.
 - include 경로는 serializer 선언과 `QueryPolicy.includes` 양쪽에서 허용되어야 한다. serializer의 loader option을 우회하는 지연 로딩을 route 안에 추가하지 않는다.
-- controller는 `CrudActions`를 상속하고 `model_class`, `serializer_class`, 세 write schema, `relationships_schema`, `query_policy`를 선언한다. `enable_upsert = True`는 PostgreSQL PUT 계약이 필요한 자원에만 둔다.
+- controller는 `CrudActions`를 상속하고 `model_class`, `serializer_class`, 세 write schema, `relationships_schema`, `query_policy`를 선언한다. `enable_upsert = True`는 PostgreSQL PUT 계약이 필요한 자원에만 둔다. `enable_writes = False`는 참조 데이터처럼 서버가 관리하는 자원에 둔다 — 쓰기 라우트와 관계 mutation 라우트가 등록되지 않고, 세 write schema를 선언하지 않아도 된다. 제네릭 인자는 `CrudActions[Model, BaseModel, BaseModel, BaseModel]`로 묶는다.
 - 자원별 규칙이 공통 lifecycle hook으로 표현되지 않을 때만 controller 메서드를 재정의한다. 예외는 `JsonApiException`으로 전달하고 일반 JSON 응답을 직접 만들지 않는다.
 
 ## 새 자원 점검

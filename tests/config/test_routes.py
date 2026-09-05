@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from fastapi.routing import APIRoute
+
 import config.routes as routes
 from app.controllers.concerns import CrudActions
 
@@ -26,7 +28,11 @@ def _composed_crud_controllers() -> list[ComposedController]:
 def test_routes_expose_expected_crud_controllers() -> None:
     composed = [type(controller).__name__ for controller in _composed_crud_controllers()]
 
-    assert composed == ["ExamplesController"]
+    assert composed == [
+        "ExamplesController",
+        "ExampleCategoriesController",
+        "ExampleTagsController",
+    ]
 
 
 def test_serializer_resource_path_matches_composed_prefix() -> None:
@@ -47,3 +53,15 @@ def test_composed_type_names_are_lower_camel_case() -> None:
     for controller in _composed_crud_controllers():
         # Nothing validates ``type_name`` at runtime; it only decides the public contract.
         assert re.fullmatch(r"[a-z][a-zA-Z0-9]*", controller.serializer_class.type_name)
+
+
+def test_reference_resource_controllers_are_read_only() -> None:
+    read_only = {"ExampleCategoriesController", "ExampleTagsController"}
+
+    for controller in _composed_crud_controllers():
+        if type(controller).__name__ not in read_only:
+            continue
+        methods = {
+            method for route in controller.router.routes if isinstance(route, APIRoute) for method in route.methods
+        }
+        assert methods == {"GET"}

@@ -75,32 +75,43 @@ class CrudActions[
 
     def __init__(self, *, prefix: str, tags: list[str]) -> None:
         super().__init__(prefix=prefix, tags=tags)
-        self._create_document_schema = write_document_model(
-            name=f"{type(self).__name__}Create",
-            attributes_schema=self.create_schema,
-            require_attributes=True,
-            require_id=False,
-            relationships_schema=self.relationships_schema,
-        )
-        self._update_document_schema = write_document_model(
-            name=f"{type(self).__name__}Update",
-            attributes_schema=self.update_schema,
-            require_attributes=False,
-            require_id=True,
-            relationships_schema=self.relationships_schema,
-        )
-        self._replace_document_schema = write_document_model(
-            name=f"{type(self).__name__}Replace",
-            attributes_schema=self.replace_schema,
-            require_attributes=True,
-            require_id=True,
-            relationships_schema=self.relationships_schema,
-        )
-        self._writable_relationship_names = frozenset(
-            field.alias or snake_to_camel(field_name)
-            for field_name, field in (
-                self.relationships_schema.model_fields.items() if self.relationships_schema is not None else ()
+        self._create_document_schema = None
+        self._update_document_schema = None
+        self._replace_document_schema = None
+        if self.enable_writes:
+            self._create_document_schema = write_document_model(
+                name=f"{type(self).__name__}Create",
+                attributes_schema=self.create_schema,
+                require_attributes=True,
+                require_id=False,
+                relationships_schema=self.relationships_schema,
             )
+            self._update_document_schema = write_document_model(
+                name=f"{type(self).__name__}Update",
+                attributes_schema=self.update_schema,
+                require_attributes=False,
+                require_id=True,
+                relationships_schema=self.relationships_schema,
+            )
+            self._replace_document_schema = write_document_model(
+                name=f"{type(self).__name__}Replace",
+                attributes_schema=self.replace_schema,
+                require_attributes=True,
+                require_id=True,
+                relationships_schema=self.relationships_schema,
+            )
+        # 읽기 전용 자원은 relationships_schema를 선언했더라도 쓰기 관계 라우트를
+        # 갖지 않는다. 이 빈 집합이 register_relationship_routes의 mutation 등록을
+        # 막는 유일한 장치이므로 조건을 여기서 건다.
+        self._writable_relationship_names = (
+            frozenset(
+                field.alias or snake_to_camel(field_name)
+                for field_name, field in (
+                    self.relationships_schema.model_fields.items() if self.relationships_schema is not None else ()
+                )
+            )
+            if self.enable_writes
+            else frozenset()
         )
         self._relationship_document_schemas = {
             public_name: relationship_document_model(
@@ -120,6 +131,7 @@ class CrudActions[
             controller_name=type(self).__name__,
             read_dependencies=self.read_dependencies,
             write_dependencies=self.write_dependencies,
+            enable_writes=self.enable_writes,
             enable_upsert=self.enable_upsert,
             index=self.index,
             show=self.show,
