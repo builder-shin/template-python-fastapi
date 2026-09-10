@@ -1,4 +1,39 @@
+<!-- Generated: 2026-09-11 | Updated: 2026-09-11 -->
+
 # Python FastAPI Template 작업 지침
+
+## 목적과 구조
+
+Python 3.12 이상에서 FastAPI, Pydantic 2, 동기식 SQLAlchemy 2와 PostgreSQL을 사용하는 JSON:API 1.1 템플릿이다. 선언형 `CrudActions` 기반 Example 자원과 읽기 전용 category·tag, Argon2·JWT 인증, refresh session 회전·정리, Redis 기반 Dramatiq worker를 제공한다. 실행·요청 예제는 `README.md`, 디렉터리별 변경 계약은 아래 하위 지침에서 확인한다.
+
+## 주요 파일
+
+| 파일 | 역할 |
+| --- | --- |
+| `README.md` | Docker·로컬 실행, 인증·JSON:API 요청, migration, worker와 검증 예제 |
+| `pyproject.toml` | 런타임·개발 의존성, Ruff, strict mypy, pytest와 80% coverage 설정 |
+| `uv.lock` | uv 의존성 해석 결과; CI와 이미지 빌드는 `uv sync --frozen` 사용 |
+| `Dockerfile` | uv builder와 비루트 Python runtime 이미지, ASGI 실행과 readiness healthcheck |
+| `docker-compose.yml` | PostgreSQL·Redis·migration·API·worker의 환경과 시작 의존성 |
+| `docker-compose.test.yml` | 독립 테스트용 PostgreSQL 서비스와 localhost 포트 매핑 |
+| `alembic.ini` | `db/migrations` 경로와 Alembic logging; URL 선택은 migration 환경 모듈에서 처리 |
+| `.env.example` | 필수 DB·JWT·Redis 환경 변수, DB 풀·토큰 수명·세션 보존 기간 예시 |
+| `.pre-commit-config.yaml` | Ruff 수정·포맷, detect-secrets baseline과 프로젝트 환경의 mypy hook |
+| `.secrets.baseline` | detect-secrets 탐지기·필터와 승인된 탐지 결과 기준 |
+| `.gitignore` | 가상환경·캐시·로컬 설정·루트 `/docs/`의 미추적 파일 등 Git 제외 범위 |
+| `.dockerignore` | 이미지 build context에서 환경·캐시·테스트·설계 문서 제외 |
+
+## 하위 디렉터리
+
+| 경로 | 역할과 하위 지침 |
+| --- | --- |
+| `.github/` | [GitHub Actions 구성](.github/AGENTS.md) |
+| `app/` | [인증·작업·모델·입출력·컨트롤러·프로토콜](app/AGENTS.md) |
+| `config/` | [앱 factory, 라우트, DB·인증·broker 설정](config/AGENTS.md) |
+| `db/` | [Alembic migration과 명시적 seed](db/AGENTS.md) |
+| `docs/` | [인증·worker 설계와 참조 자원 구현 계획](docs/AGENTS.md) |
+| `scripts/` | [실제 PostgreSQL을 사용하는 전체 검증 스크립트](scripts/AGENTS.md) |
+| `tests/` | [계약별 회귀 테스트와 격리 fixture](tests/AGENTS.md) |
 
 ## 아키텍처 규칙
 
@@ -7,6 +42,7 @@
 - `Accept` 협상을 생략하는 컨트롤러는 `negotiate_accept = False`로, 루트에 마운트되는 컨트롤러는 `allow_root_prefix = True`로 그 의도를 코드에 남긴다. router 인자를 빠뜨려서 표현하지 않는다.
 - 새 JSON:API 리소스 컨트롤러는 `CrudActions`를 상속한다.
 - 컨트롤러에는 모델, 시리얼라이저, create/update/replace 스키마, 관계 스키마, 조회 정책을 선언한다.
+- 읽기 전용 자원은 `enable_writes = False`를 선언하며 쓰기 스키마를 생략할 수 있다. 현재 category·tag controller는 관계 없는 GET 목록·단건만 등록한다.
 - 공통 액션으로 표현할 수 없는 도메인 동작만 명시적 훅이나 메서드 재정의로 추가한다.
 - Rails에 가까운 얇은 컨트롤러 구조를 유지하며 별도 repository 또는 service 계층을 만들지 않는다.
 - 라우터는 `config/routes.py`에 명시적으로 등록한다. 자동 탐색이나 숨은 import 등록을 추가하지 않는다.
@@ -91,8 +127,28 @@ docker compose down -v
 
 | 경로 | 소유하는 로컬 계약 |
 | --- | --- |
-| `config/AGENTS.md` | factory·명시 route·동기식 engine과 세션 조립 |
-| `db/AGENTS.md` | 호출자 소유 transaction의 결정적 seed |
-| `db/migrations/AGENTS.md` | Alembic URL 선택과 revision upgrade/downgrade |
-| `app/AGENTS.md` | 모델·schema·serializer·controller의 계층 책임 |
-| `tests/AGENTS.md` | PostgreSQL fixture와 계약별 회귀 테스트 배치 |
+| [config/AGENTS.md](config/AGENTS.md) | factory·명시 route·동기식 engine과 세션 조립 |
+| [db/AGENTS.md](db/AGENTS.md) | 호출자 소유 transaction의 결정적 seed |
+| [db/migrations/AGENTS.md](db/migrations/AGENTS.md) | Alembic URL 선택과 revision upgrade/downgrade |
+| [app/AGENTS.md](app/AGENTS.md) | 모델·schema·serializer·controller의 계층 책임 |
+| [tests/AGENTS.md](tests/AGENTS.md) | PostgreSQL fixture와 계약별 회귀 테스트 배치 |
+
+## 인증·작업 큐 조립
+
+- `create_app()`은 인증·DB 설정을 읽고 앱별 engine과 session factory를 `app.state`에 저장한 뒤 예외 handler와 라우터를 등록한다. lifespan 종료 시 engine을 dispose한다. 설정 모듈은 `config/settings.py`의 공통 환경 변수 검증을 사용한다.
+- `DATABASE_URL`과 `JWT_SECRET_KEY`는 API 설정에 필수이며 worker broker에는 `REDIS_URL`이 필요하다. `.env.example`은 예시 파일이고 코드의 암묵적인 fallback 설정이 아니다.
+- 인증·현재 사용자·Example·category·tag·health 라우트는 `config/routes.py`에서 명시적으로 조립한다. Example 조회는 공개이고 쓰기와 관계 변경에는 활성 사용자의 Bearer access token이 필요하다.
+- API import와 시작을 Redis 연결 성공에 결합하지 않는다. Compose에서 API는 migration 완료를, worker는 migration 완료와 Redis 정상 상태를 기다린다.
+- worker는 `uv run dramatiq app.jobs`로 별도 실행한다. Example actor의 enqueue 시점은 도메인 호출부가 명시하며 공통 CRUD에서 자동 실행하지 않는다.
+- `purge_expired_refresh_sessions`는 보존 기간이 지난 만료 세션을 정리하는 별도 actor다. 배치·잠금·재시도와 수동 enqueue 계약은 [작업 지침](app/jobs/AGENTS.md)을 따른다.
+- 인증 변경은 `tests/auth`, `tests/schemas`, `tests/serializers`, `tests/test_auth_controller.py`, `tests/test_user_controller.py`를 함께 검토한다. 작업 큐 변경은 `tests/jobs`, `tests/config/test_broker.py`, Compose 설정을 함께 확인한다. 좁은 pytest 실행에는 위 테스트 DB 전제조건을 적용한다.
+
+## 의존성과 문서 관리
+
+- 내부 연결: `config`가 `app`을 조립하고, `db/migrations`가 ORM metadata를 사용하며, `tests`는 실제 factory·migration·PostgreSQL fixture로 동작을 검증한다.
+- 외부 런타임: FastAPI·Uvicorn, Pydantic·email-validator, SQLAlchemy·psycopg·Alembic, PyJWT·pwdlib Argon2, Dramatiq·Redis.
+- 개발 도구: uv·poethepoet, pytest·pytest-cov·HTTPX, Ruff, strict mypy, PyYAML·types-pyyaml, pre-commit·detect-secrets, Docker Compose. 의존성 변경 시 manifest와 lock을 함께 검토한다.
+- `AGENTS.md`는 UTF-8로 저장한다. 하위 문서는 바로 위 디렉터리의 `AGENTS.md`를 Parent 태그로 연결하고, 실제 파일과 테스트에서 확인한 계약만 설명한다.
+- 루트 `/docs/` ignore 패턴은 새 미추적 파일에 적용된다. 이 저장소의 설계·계획 문서와 `AGENTS.md`는 명시적으로 Git 추적에 포함한다. `tests/docs/`는 해당 루트 패턴의 대상이 아니며 문서·도구 설정 회귀 테스트를 보관한다.
+
+<!-- MANUAL: 이 아래에 추가한 수동 메모는 deepinit 갱신 시 보존한다. -->
