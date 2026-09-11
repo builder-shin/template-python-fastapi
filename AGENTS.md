@@ -4,7 +4,9 @@
 
 ## 목적과 구조
 
-Python 3.12 이상에서 FastAPI, Pydantic 2, 동기식 SQLAlchemy 2와 PostgreSQL을 사용하는 JSON:API 1.1 템플릿이다. 선언형 `CrudActions` 기반 Example 자원과 읽기 전용 category·tag, Argon2·JWT 인증, refresh session 회전·정리, Redis 기반 Dramatiq worker를 제공한다. 실행·요청 예제는 `README.md`, 디렉터리별 변경 계약은 아래 하위 지침에서 확인한다.
+Python 3.13에서 FastAPI, Pydantic 2, 동기식 SQLAlchemy 2와 PostgreSQL을 사용하는 JSON:API 1.1 템플릿이다. 선언형 `CrudActions` 기반 Example 자원과 읽기 전용 category·tag, Argon2·JWT 인증, refresh session 회전·정리, Redis 기반 Dramatiq worker를 제공한다. 실행·요청 예제는 `README.md`, 디렉터리별 변경 계약은 아래 하위 지침에서 확인한다.
+
+이메일 계약은 Python 3.13의 Unicode 15.1 기준이다. `.python-version`, `requires-python`, CI와 Docker builder·runtime을 함께 고정한다. Python minor 버전 변경은 NestJS·Rails의 고정 Unicode 프로필과 공통 이메일 회귀 검증을 동반해야 한다.
 
 ## 주요 파일
 

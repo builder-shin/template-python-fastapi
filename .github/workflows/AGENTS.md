@@ -11,7 +11,7 @@
 
 ## 작업 지침과 공통 패턴
 
-- 현재 권한은 `contents: read`다. checkout 후 `astral-sh/setup-uv`로 uv `0.9.30`과 cache를 설정한다.
+- 현재 권한은 `contents: read`다. checkout 후 `astral-sh/setup-uv`로 uv `0.9.30`, Python `3.13`과 cache를 설정한다. 이메일 Unicode 15.1 계약을 위해 로컬·CI·Docker의 Python minor 버전을 함께 유지한다.
 - 실행 순서는 `uv sync --frozen` → `./scripts/check.sh` → `docker compose config --quiet` → `docker build --target runtime --tag template-python-fastapi:ci .`다.
 - DB 준비와 cleanup은 `check.sh`에 맡긴다. workflow에 SQLite 대체 경로나 다른 검사 구현을 복사하지 않는다.
 - uv 버전·lock 설치 방식·runtime target을 변경할 때 `Dockerfile`과 README 검증 예제도 비교한다.

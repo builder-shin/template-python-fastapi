@@ -234,7 +234,7 @@ def test_get_session_closes_session() -> None:
     app = _application_with_session_factory(lambda: fake_context)
 
     # get_session is declared as Iterator[Session]; close() belongs to the generator it really is.
-    generator = cast(Generator[Session, None, None], database.get_session(_request(app)))
+    generator = cast(Generator[Session], database.get_session(_request(app)))
 
     assert next(generator) is fake_session
     generator.close()

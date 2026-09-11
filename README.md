@@ -2,6 +2,8 @@
 
 FastAPI, SQLAlchemy 2, PostgreSQL, Alembic으로 구성한 JSON:API 1.1 템플릿입니다. 자체 JWT 인증과 Redis 기반 Dramatiq worker를 제공하며, Rails 컨트롤러의 공통 CRUD 액션과 비슷하게 `CrudActions`를 상속합니다. 도메인 컨트롤러에는 모델·스키마·시리얼라이저·조회 정책만 선언합니다.
 
+실행 환경은 Python 3.13입니다. 로컬 `.python-version`, CI, Docker builder·runtime을 같은 minor 버전으로 고정해 이메일 검증과 계정 정규화가 공통 Unicode 15.1 기준을 유지하도록 합니다. Python minor 버전을 바꿀 때는 NestJS·Rails의 고정 Unicode 프로필과 이메일 회귀 사례를 함께 갱신해야 합니다.
+
 ## 구조
 
 ```text
