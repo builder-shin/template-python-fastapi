@@ -329,6 +329,8 @@ process_example.send(str(example.id))
 
 actor는 잘못된 UUID와 존재하지 않는 Example을 경고로 남기고 종료합니다. 일시적인 DB 오류는 최대 세 번 재시도하며 Example의 공개 필드는 변경하지 않습니다.
 
+두 작업의 재시도는 최초 실행 뒤 최대 3회입니다. n번째 재시도는 `15 * 2**(n-1)`초에 `0..(10*n-1)` 범위에서 균등하게 뽑은 정수 초를 더해 기다립니다. 따라서 대기는 차례로 15–24초, 30–49초, 60–89초입니다.
+
 ### 만료 refresh 세션 정리
 
 `refresh_sessions`에는 로그인과 회전마다 행이 쌓이고 로그아웃은 `revoked_at`만 표시하므로, 보존 기간이 지난 행은 `purge_expired_refresh_sessions` actor로 정리합니다.
@@ -342,6 +344,7 @@ purge_expired_refresh_sessions.send()
 - 삭제 대상은 `expires_at`이 `REFRESH_SESSION_RETENTION_SECONDS`보다 더 오래 지난 행뿐입니다. 아직 유효한 세션과 방금 폐기된 세션은 보존 기간 값과 무관하게 남습니다.
 - `REFRESH_SESSION_RETENTION_SECONDS`의 기본값은 `604800`초(7일)이고 worker 프로세스만 사용합니다. 음수를 주면 `REFRESH_SESSION_RETENTION_SECONDS must be non-negative`로 실패합니다.
 - 삭제는 오래된 순서로 배치마다 commit하며 잠긴 행은 건너뜁니다. 그래서 로그인과 회전이 삭제 대상 행에 잡는 잠금 뒤에 줄 서지 않습니다.
+- 기본 배치 크기는 1,000이며 한 번의 실행은 최대 10,000배치입니다. 배치 크기는 `1..9007199254740991`의 정수 값인 숫자만 허용하며 `1.0`도 허용합니다. 문자열·불리언·범위 밖 값은 DB에 접근하지 않고 종료합니다. 직접 호출 결과는 삭제 수 `deleted`와 실행한 배치 수 `batches`이며, 마지막 빈 배치도 셉니다.
 - 다만 `SKIP LOCKED`는 이 statement가 고르는 행에만 적용됩니다. 삭제된 행을 가리키던 회전 chain 행의 `replaced_by_id`를 비우는 `ON DELETE SET NULL` cascade는 별도 행 잠금을 잡으므로, 각 배치는 짧은 `lock_timeout` 아래에서 실행됩니다. 경합하면 그 배치는 무한정 기다리지 않고 실패하고 Dramatiq가 actor를 재시도하며, 이미 commit된 배치는 그대로 남습니다.
 - 보존 기간까지 지난 refresh token을 제시하면 오류 코드가 `TOKEN_EXPIRED`에서 `INVALID_TOKEN`으로 바뀝니다. 상태 코드는 401로 같습니다.
 
@@ -464,5 +467,7 @@ uv run poe check         # ./scripts/check.sh 전체 게이트
 ```
 
 `check`는 `scripts/check.sh`를 호출만 하므로 CI와 로컬 게이트가 갈라지지 않습니다. 다만 그 스크립트는 bash이므로 Windows에서는 Git Bash 또는 WSL이 필요하고, 나머지 태스크는 bash 없이 동작합니다.
+
+세 백엔드의 공통 조회 계약에 따라 `score` 필터는 PostgreSQL 32비트 정수 범위만 허용하고, 페이지 offset은 JavaScript에서도 정확하게 계산할 수 있는 9,007,199,254,740,991까지 허용합니다. 범위를 넘는 요청은 400 검증 오류를 반환합니다.
 
 커밋 시점에도 타입 오류를 잡도록 `.pre-commit-config.yaml`에 프로젝트 가상환경을 그대로 쓰는 `mypy` 훅(`language: system`, `entry: uv run mypy .`)을 등록했습니다.

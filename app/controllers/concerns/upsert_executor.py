@@ -68,7 +68,9 @@ class CrudUpsert[
 
         with session.begin():
             self._lock_upsert_resource(session, coerced_id)
-            existing = self._find_resource_or_none(session, resource_id)
+            # Coordinate PUT with PATCH and dedicated relationship mutations before
+            # loading the relationship snapshot; the advisory lock covers PUT only.
+            existing = self._find_resource_or_none(session, resource_id, for_update=True)
             created = existing is None
             model = existing if existing is not None else self.model_class()
             if created:

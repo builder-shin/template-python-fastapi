@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from app.jsonapi import register_exception_handlers
 from config.auth import AuthSettings
 from config.database import DatabaseSettings, build_engine
+from config.openapi_contract import install_openapi
 from config.routes import api_router
 
 
@@ -41,4 +42,5 @@ def create_app() -> FastAPI:
     app.state.session_factory = sessionmaker(bind=engine, expire_on_commit=False)
     register_exception_handlers(app)
     app.include_router(api_router)
+    install_openapi(app)
     return app

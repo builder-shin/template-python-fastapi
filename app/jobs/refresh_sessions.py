@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import dramatiq
@@ -18,10 +19,20 @@ logger = logging.getLogger(__name__)
 # that ``SKIP LOCKED`` does not cover. Short enough that a stalled batch is retried well
 # inside the actor's 15s minimum backoff.
 _BATCH_LOCK_TIMEOUT_MS = 2_000
+_MAX_BATCHES = 10_000
+_MAX_BATCH_SIZE = 2**53 - 1
+
+
+@dataclass(frozen=True, slots=True)
+class PurgeResult:
+    """Deleted rows and committed batch attempts, including a final empty batch."""
+
+    deleted: int
+    batches: int
 
 
 @dramatiq.actor(max_retries=3, min_backoff=15_000)
-def purge_expired_refresh_sessions(batch_size: int = 1_000) -> int:
+def purge_expired_refresh_sessions(batch_size: int | float = 1_000) -> PurgeResult:
     """Delete refresh sessions whose expiry is older than the retention window.
 
     Rows are selected by ``expires_at`` only, so a session that can still be
@@ -40,15 +51,22 @@ def purge_expired_refresh_sessions(batch_size: int = 1_000) -> int:
     committed before that point stay deleted.
     """
 
-    if batch_size <= 0:
+    if (
+        isinstance(batch_size, bool)
+        or not isinstance(batch_size, (int, float))
+        or not 1 <= batch_size <= _MAX_BATCH_SIZE
+        or int(batch_size) != batch_size
+    ):
         logger.warning(
-            "Skipping refresh session purge because the batch size is not positive",
+            "Skipping refresh session purge because the batch size is not a positive safe integer",
             extra={
                 "event": "refresh_sessions.invalid_batch_size",
                 "batch_size": batch_size,
             },
         )
-        return 0
+        return PurgeResult(deleted=0, batches=0)
+
+    batch_size = int(batch_size)
 
     settings = RefreshSessionRetentionSettings.from_env()
     cutoff = datetime.now(UTC) - timedelta(seconds=settings.retention_seconds)
@@ -58,13 +76,20 @@ def purge_expired_refresh_sessions(batch_size: int = 1_000) -> int:
         .order_by(RefreshSession.expires_at)
         .limit(batch_size)
         .with_for_update(skip_locked=True)
+        .cte("candidates")
+        .prefix_with("MATERIALIZED")
     )
-    statement = delete(RefreshSession).where(RefreshSession.id.in_(expired_ids)).returning(RefreshSession.id)
+    # Materialize the locking selection once. A nested-loop rescan of an inline
+    # SKIP LOCKED subquery can otherwise select more than batch_size rows.
+    statement = (
+        delete(RefreshSession).where(RefreshSession.id.in_(select(expired_ids.c.id))).returning(RefreshSession.id)
+    )
 
     deleted = 0
+    batches = 0
     session_factory = get_session_factory()
     with session_factory() as session:
-        while True:
+        while batches < _MAX_BATCHES:
             # ``SET LOCAL`` binds the timeout to this batch's transaction, so the bound
             # can never outlive the batch on a pooled connection shared with other jobs.
             session.execute(text(f"SET LOCAL lock_timeout = '{_BATCH_LOCK_TIMEOUT_MS}ms'"))
@@ -76,15 +101,22 @@ def purge_expired_refresh_sessions(batch_size: int = 1_000) -> int:
             )
             session.commit()
             deleted += batch
+            batches += 1
             if batch < batch_size:
                 break
+        else:
+            logger.warning(
+                "Stopped refresh session purge at the batch cap",
+                extra={"event": "refresh_sessions.batch_cap", "deleted": deleted, "batches": batches},
+            )
 
     logger.info(
         "Purged expired refresh sessions",
         extra={
             "event": "refresh_sessions.purged",
             "deleted": deleted,
+            "batches": batches,
             "cutoff": cutoff.isoformat(),
         },
     )
-    return deleted
+    return PurgeResult(deleted=deleted, batches=batches)

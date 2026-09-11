@@ -73,8 +73,9 @@
 | 관계·부모 행 잠금·related 페이지 | `uv run pytest --no-cov tests/controllers/test_relationship_actions.py -q` |
 | PUT 경쟁·RETURNING·rollback | `uv run pytest --no-cov tests/controllers/test_upsert.py -q` |
 | router base·협상·prefix | `uv run pytest --no-cov tests/controllers/test_jsonapi_controller.py -q` |
+| 공통 쓰기 입력·오류 집합 | `uv run pytest --no-cov tests/controllers/test_complete_write_contract.py -q` |
 
-공통 변경은 네 묶음과 선언형 controller를 함께 검토한다. SQLite mock이나 직접 호출만으로 DB 계약을 판정하지 않는다.
+공통 변경은 다섯 묶음과 선언형 controller를 함께 검토한다. SQLite mock이나 직접 호출만으로 DB 계약을 판정하지 않는다.
 
 ### Common Patterns
 

@@ -23,7 +23,8 @@ def test_configure_broker_sets_redis_broker(monkeypatch: pytest.MonkeyPatch) -> 
 
     configured = broker_config.configure_broker()
 
-    redis_broker_factory.assert_called_once_with(url="redis://queue.example:6380/4")
+    redis_broker_factory.assert_called_once()
+    assert redis_broker_factory.call_args.kwargs["url"] == "redis://queue.example:6380/4"
     set_broker.assert_called_once_with(redis_broker)
     assert configured is redis_broker
 

@@ -29,6 +29,7 @@ packages = ["app", "config"]
 dev = [
     "detect-secrets>=1.5",
     "httpx>=0.28",
+    "jsonschema>=4.26.0",
     "mypy>=1.13",
     "poethepoet>=0.48.0",
     "pre-commit>=4.0",

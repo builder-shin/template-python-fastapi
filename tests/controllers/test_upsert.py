@@ -6,12 +6,13 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from threading import Barrier
+from threading import Barrier, Event
+from time import monotonic, sleep
 from typing import ClassVar
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 from sqlalchemy import Engine, ForeignKey, String, event, func, select
@@ -30,6 +31,7 @@ from app.schemas.example import (
     ExampleRelationships,
     ExampleReplace,
     ExampleUpdate,
+    ToManyRelationship,
 )
 from app.serializers import ExampleSerializer
 from app.serializers.base import JsonApiSerializer, RelationshipDefinition
@@ -58,6 +60,101 @@ class UpsertController(CrudActions[Example, ExampleCreate, ExampleUpdate, Exampl
 
 class ReadOnlyRelationshipsUpsertController(UpsertController):
     relationships_schema = None
+
+
+def test_existing_put_locks_before_reading_relationships(
+    db_engine: Engine,
+    concurrent_session_factory: Callable[[], Session],
+) -> None:
+    """A dedicated replacement must wait for a PUT's relationship snapshot."""
+    resource_id, first_tag, second_tag = uuid4(), uuid4(), uuid4()
+    with concurrent_session_factory() as setup, setup.begin():
+        setup.add_all(
+            [
+                Example(id=resource_id, title="Before", status=ExampleStatus.DRAFT, score=42),
+                ExampleTag(id=first_tag, name="First"),
+                ExampleTag(id=second_tag, name="Second"),
+            ]
+        )
+    put_loaded, release_put, mutation_started = Event(), Event(), Event()
+    mutation_pids: list[int] = []
+
+    class PausedController(UpsertController):
+        def before_upsert(self, session: Session, model: Example, attributes: ExampleReplace) -> None:
+            put_loaded.set()
+            assert release_put.wait(10), "PUT release timed out"
+
+    controller = PausedController(prefix="/api/v1/examples", tags=["examples"])
+
+    def request(method: str) -> Request:
+        return Request(
+            {
+                "type": "http",
+                "method": method,
+                "path": f"/api/v1/examples/{resource_id}",
+                "query_string": b"",
+                "headers": [],
+            }
+        )
+
+    assert controller._replace_document_schema is not None
+    document = controller._replace_document_schema.model_validate(
+        {
+            "data": {
+                "type": "examples",
+                "id": str(resource_id),
+                "attributes": {"title": "Replaced", "status": "active", "score": 42},
+                "relationships": {"tags": {"data": [{"type": "exampleTags", "id": str(first_tag)}]}},
+            }
+        }
+    )
+    linkage = ToManyRelationship.model_validate({"data": [{"type": "exampleTags", "id": str(second_tag)}]})
+
+    def put() -> int:
+        with concurrent_session_factory() as session:
+            return controller.upsert(str(resource_id), request("PUT"), document, session).status_code
+
+    def replace_tags() -> int:
+        with db_engine.connect() as connection:
+            pid = connection.scalar(select(func.pg_backend_pid()))
+            assert isinstance(pid, int)
+            mutation_pids.append(pid)
+            with Session(bind=connection, join_transaction_mode="control_fully") as session:
+                mutation_started.set()
+                return controller.mutate_relationship(
+                    str(resource_id),
+                    "tags",
+                    "replace",
+                    request("PATCH"),
+                    linkage,
+                    session,
+                ).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        replacement = executor.submit(put)
+        try:
+            assert put_loaded.wait(10), "PUT did not load its relationship snapshot"
+            mutation = executor.submit(replace_tags)
+            assert mutation_started.wait(10)
+            blocked = False
+            deadline = monotonic() + 5
+            with db_engine.connect() as observer:
+                while monotonic() < deadline:
+                    if observer.scalar(select(func.pg_blocking_pids(mutation_pids[0]))):
+                        blocked = True
+                        break
+                    if mutation.done():
+                        break
+                    sleep(0.01)
+            assert blocked, "Relationship replacement passed a PUT's unlocked snapshot"
+        finally:
+            release_put.set()
+        assert replacement.result(timeout=10) == 200
+        assert mutation.result(timeout=10) == 204
+    with concurrent_session_factory() as verification:
+        persisted = verification.get(Example, resource_id)
+        assert persisted is not None
+        assert [tag.id for tag in persisted.tags] == [second_tag]
 
 
 class RollbackUpsertController(UpsertController):

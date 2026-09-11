@@ -48,6 +48,7 @@ example_tags = Table(
         ForeignKey("tags.id", ondelete="CASCADE"),
         primary_key=True,
     ),
+    Index("ix_example_tags_tag_id", "tag_id"),
 )
 
 
@@ -62,6 +63,7 @@ class Example(TimestampMixin, Base):
         # The per-column directions are load bearing; a plain (created_at, id)
         # btree degrades the plan to an incremental sort.
         Index("ix_examples_created_at_id", text("created_at DESC"), text("id")),
+        Index("ix_examples_title_id", "title", "id"),
     )
 
     id: Mapped[UUID] = mapped_column(

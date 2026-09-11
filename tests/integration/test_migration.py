@@ -57,6 +57,7 @@ def test_upgrade_head_builds_required_tables_in_an_empty_database(
 
         assert set(inspect(migrated_engine).get_table_names()) == {
             "alembic_version",
+            "email_identity_backups",
             "categories",
             "tags",
             "examples",
@@ -65,6 +66,19 @@ def test_upgrade_head_builds_required_tables_in_an_empty_database(
             "refresh_sessions",
         }
         assert "ix_examples_created_at_id" in _example_index_names(migrated_engine)
+        assert "ix_examples_title_id" in _example_index_names(migrated_engine)
+        assert "ix_examples_category_id" in _example_index_names(migrated_engine)
+        assert "ix_example_tags_tag_id" in _index_names(migrated_engine, "example_tags")
+        with migrated_engine.connect() as connection:
+            indexes = (
+                connection.execute(
+                    text("SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'examples'")
+                )
+                .scalars()
+                .all()
+            )
+        assert any("(created_at DESC, id)" in definition for definition in indexes)
+        assert any("(title, id)" in definition for definition in indexes)
         assert "ix_refresh_sessions_expires_at" in _refresh_session_index_names(migrated_engine)
 
         command.downgrade(config, "20260822_0003")

@@ -34,7 +34,7 @@ def _attributes(**overrides: Any) -> dict[str, Any]:
     "overrides",
     [
         {"score": "50"},
-        {"score": 50.0},
+        {"score": 50.5},
         {"score": True},
         {"score": 101},
         {"score": -1},
@@ -47,7 +47,7 @@ def _attributes(**overrides: Any) -> dict[str, Any]:
     ],
     ids=[
         "numeric-string-score",
-        "float-score",
+        "fractional-score",
         "bool-score",
         "score-above-range",
         "negative-score",

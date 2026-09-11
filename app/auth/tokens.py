@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -93,13 +94,15 @@ def decode_token(
             audience=settings.audience,
             issuer=settings.issuer,
             leeway=settings.leeway_seconds,
-            options={"require": REQUIRED_CLAIMS},
+            options={"require": REQUIRED_CLAIMS, "verify_exp": False, "verify_iat": False, "verify_nbf": False},
         )
     except jwt.ExpiredSignatureError as error:
         raise TokenExpired from error
     except jwt.InvalidTokenError as error:
         raise InvalidToken from error
-    return _typed_claims(payload, expected_type=expected_type, settings=settings)
+    claims = _typed_claims(payload, expected_type=expected_type, settings=settings)
+    _check_temporal(payload, settings=settings)
+    return claims
 
 
 def decode_expired_refresh_token(
@@ -117,11 +120,13 @@ def decode_expired_refresh_token(
             audience=settings.audience,
             issuer=settings.issuer,
             leeway=settings.leeway_seconds,
-            options={"require": REQUIRED_CLAIMS, "verify_exp": False},
+            options={"require": REQUIRED_CLAIMS, "verify_exp": False, "verify_iat": False, "verify_nbf": False},
         )
     except jwt.InvalidTokenError as error:
         raise InvalidToken from error
-    return _typed_claims(payload, expected_type="refresh", settings=settings)
+    claims = _typed_claims(payload, expected_type="refresh", settings=settings)
+    _check_temporal(payload, settings=settings, ignore_expiration=True)
+    return claims
 
 
 def hash_refresh_token(token: str) -> str:
@@ -142,13 +147,9 @@ def _typed_claims(
     expected_type: TokenType,
     settings: AuthSettings,
 ) -> TokenClaims:
-    # jwt.decode already enforced the HS256 signature, the presence of every
-    # REQUIRED_CLAIMS entry, string-typed "sub"/"jti"/"iss", "iss" equality and
-    # numeric "iat"/"exp" coercion, plus non-strict "aud" membership.
-    # This helper adds what PyJWT leaves open: a non-empty "sub", a UUID-parsable
-    # "jti", "type" equal to the expected token type, numeric dates that reject
-    # bool, and an "aud" that equals the configured audience exactly instead of
-    # merely containing it.
+    # Signature, required claims, issuer and audience are checked by PyJWT.
+    # Validate shape/ranges before any temporal classification so malformed
+    # expired payloads remain INVALID_TOKEN in every implementation.
     try:
         sub = payload["sub"]
         raw_jti = payload["jti"]
@@ -170,8 +171,12 @@ def _typed_claims(
             raise ValueError
         if audience != settings.audience:
             raise ValueError
-        iat = datetime.fromtimestamp(raw_iat, UTC)
-        exp = datetime.fromtimestamp(raw_exp, UTC)
+        raw_nbf = payload.get("nbf")
+        if "nbf" in payload and not _is_numeric_date(raw_nbf):
+            raise ValueError
+        epoch = datetime(1970, 1, 1, tzinfo=UTC)
+        iat = epoch + timedelta(seconds=raw_iat)
+        exp = epoch + timedelta(seconds=raw_exp)
     except (KeyError, TypeError, ValueError, OverflowError) as error:
         raise InvalidToken from error
 
@@ -187,4 +192,19 @@ def _typed_claims(
 
 
 def _is_numeric_date(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and -62135596800 <= value < 253402300800
+    )
+
+
+def _check_temporal(payload: dict[str, Any], *, settings: AuthSettings, ignore_expiration: bool = False) -> None:
+    now = datetime.now(UTC).timestamp()
+    if int(payload["iat"]) > now + settings.leeway_seconds:
+        raise InvalidToken
+    if "nbf" in payload and int(payload["nbf"]) > now + settings.leeway_seconds:
+        raise InvalidToken
+    if not ignore_expiration and int(payload["exp"]) <= now - settings.leeway_seconds:
+        raise TokenExpired

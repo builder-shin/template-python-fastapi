@@ -30,13 +30,13 @@ def test_controller_test_guide_counts_every_file_in_its_directory() -> None:
     files = sorted(path.name for path in (PROJECT_ROOT / "tests" / "controllers").glob("test_*.py"))
 
     assert files == [
+        "test_complete_write_contract.py",
         "test_crud_actions.py",
         "test_jsonapi_controller.py",
         "test_relationship_actions.py",
         "test_upsert.py",
     ]
-    # Korean numeral for the file count; the guide must not keep claiming three.
-    assert "이 디렉터리의 네 파일" in CONTROLLER_TESTS_GUIDE
+    assert "이 디렉터리의 다섯 파일" in CONTROLLER_TESTS_GUIDE
     for name in files:
         assert f"`{name}`" in CONTROLLER_TESTS_GUIDE
         assert f"`uv run pytest --no-cov tests/controllers/{name} -q`" in CONCERNS_GUIDE

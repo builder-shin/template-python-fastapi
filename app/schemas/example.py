@@ -6,15 +6,23 @@ from datetime import datetime
 from typing import Annotated, Self
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import BeforeValidator, Field, model_validator
 from pydantic.experimental.missing_sentinel import MISSING
 
 from app.jsonapi.documents import ResourceIdentifier
 from app.jsonapi.naming import JsonApiWriteSchema
-from app.jsonapi.query import FilterField, QueryPolicy, SortTerm
+from app.jsonapi.query import FilterField, QueryPolicy, SortTerm, parse_timestamp
 from app.models import Example, ExampleStatus
 
-type Score = Annotated[int, Field(ge=0, le=100)]
+
+def _json_integer(value: object) -> object:
+    """JSON Schema integers include finite numbers with no fractional part."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+type Score = Annotated[int, BeforeValidator(_json_integer), Field(ge=0, le=100)]
 type Title = Annotated[str, Field(min_length=1, max_length=200)]
 # ``status`` is annotated inline on every schema rather than through a ``type``
 # alias: a PEP 695 alias becomes the published OpenAPI component name, so an
@@ -81,15 +89,19 @@ def _parse_status(value: str) -> ExampleStatus:
     return ExampleStatus(value)
 
 
+def _parse_score(value: str) -> int:
+    parsed = int(value)
+    if not -(2**31) <= parsed <= 2**31 - 1:
+        raise ValueError("score filter exceeds the PostgreSQL integer range")
+    return parsed
+
+
 def _parse_uuid(value: str) -> UUID:
     return UUID(value)
 
 
 def _parse_datetime(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("datetime filter must include a UTC offset")
-    return parsed
+    return parse_timestamp(value)
 
 
 # Index coverage for this policy (see the root AGENTS.md rule on keeping a
@@ -97,7 +109,8 @@ def _parse_datetime(value: str) -> datetime:
 #   - default sort ``createdAt DESC`` plus the ``id`` tie breaker is covered by
 #     ``ix_examples_created_at_id`` (created_at DESC, id).
 #   - ``category.id`` is covered by ``ix_examples_category_id``.
-#   - sorting on title/status/score/updatedAt and filtering on
+#   - title ordering uses ``ix_examples_title_id`` (title ASC, id ASC).
+#   - sorting on status/score/updatedAt and filtering on
 #     status/score/createdAt are deliberately left unindexed: ``examples`` is a
 #     template demonstration resource with no real access pattern to justify the
 #     write cost. A real service must re-decide this, and note that every sort
@@ -121,7 +134,7 @@ EXAMPLE_QUERY_POLICY = QueryPolicy(
         ),
         "score": FilterField(
             column=Example.score,
-            parser=int,
+            parser=_parse_score,
             operators=frozenset({"exact", "gt", "gte", "lt", "lte", "in"}),
         ),
         "category.id": FilterField(

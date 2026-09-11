@@ -10,7 +10,7 @@ import yaml
 from app.controllers.concerns.crud_base import CrudDeclarations
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-README = (PROJECT_ROOT / "README.md").read_text()
+README = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
 AGENTS = (PROJECT_ROOT / "AGENTS.md").read_text(encoding="utf-8")
 WORKFLOW_PATH = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 
@@ -229,7 +229,7 @@ def test_readme_documents_task_runner_entrypoints() -> None:
 
 def test_ci_runs_frozen_checks_compose_validation_and_production_build() -> None:
     assert WORKFLOW_PATH.is_file()
-    workflow_text = WORKFLOW_PATH.read_text()
+    workflow_text = WORKFLOW_PATH.read_text(encoding="utf-8")
     workflow = cast(
         dict[str, Any],
         yaml.load(workflow_text, Loader=yaml.BaseLoader),  # Repository-owned static YAML.

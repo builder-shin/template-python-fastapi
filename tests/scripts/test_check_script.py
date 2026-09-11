@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -11,14 +12,14 @@ API_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_pre_commit_hooks_target_standalone_repository_root() -> None:
-    config = (API_ROOT / ".pre-commit-config.yaml").read_text()
+    config = (API_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
 
     assert "files: ^apps/api/" not in config
     assert 'args: ["--baseline", ".secrets.baseline"]' in config
 
 
 def _write_executable(path: Path, contents: str) -> None:
-    path.write_text(contents)
+    path.write_text(contents, encoding="utf-8", newline="\n")
     path.chmod(0o755)
 
 
@@ -45,11 +46,18 @@ printf 'uv:%s|url=%s|coverage=%s\\n' "$*" "${TEST_DATABASE_URL:-}" "${COVERAGE_F
     )
     environment = os.environ.copy()
     environment.pop("TEST_DATABASE_URL", None)
-    environment["CHECK_LOG"] = str(log_path)
+    environment.pop("COVERAGE_FILE", None)
+    environment["CHECK_LOG"] = log_path.as_posix()
     environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
 
+    bash = shutil.which("bash")
+    if os.name == "nt" and (git := shutil.which("git")):
+        git_bash = Path(git).resolve().parents[1] / "bin" / "bash.exe"
+        if git_bash.is_file():
+            bash = str(git_bash)
+    assert bash is not None, "The check script requires Bash (Git Bash on Windows)."
     result = subprocess.run(
-        [str(API_ROOT / "scripts/check.sh")],
+        [bash, str(API_ROOT / "scripts/check.sh")],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
@@ -58,7 +66,7 @@ printf 'uv:%s|url=%s|coverage=%s\\n' "$*" "${TEST_DATABASE_URL:-}" "${COVERAGE_F
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    lines = log_path.read_text().splitlines()
+    lines = log_path.read_text(encoding="utf-8").splitlines()
     up_line = next(line for line in lines if " up -d --wait db" in line)
     down_line = next(line for line in lines if " down -v" in line)
     project_match = re.search(r" -p (template-python-fastapi-test-[^ ]+)", up_line)

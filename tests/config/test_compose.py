@@ -75,7 +75,7 @@ def test_host_redis_url_does_not_override_the_compose_network_endpoint() -> None
 
 
 def test_example_environment_labels_a_long_development_only_secret() -> None:
-    example = (PROJECT_ROOT / ".env.example").read_text()
+    example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
     values = {
         key: value
         for line in example.splitlines()
@@ -95,7 +95,7 @@ def test_example_environment_labels_a_long_development_only_secret() -> None:
 
 
 def test_runtime_healthcheck_uses_database_readiness_endpoint() -> None:
-    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text()
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
     healthcheck = dockerfile.split("HEALTHCHECK", maxsplit=1)[1]
     assert "/health/ready" in healthcheck

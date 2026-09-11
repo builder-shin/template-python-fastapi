@@ -12,7 +12,6 @@ import dramatiq
 import pytest
 from dramatiq import Worker
 from dramatiq.brokers.stub import StubBroker
-from dramatiq.middleware import Retries
 from sqlalchemy import Engine
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
@@ -20,6 +19,7 @@ from sqlalchemy.orm import Session, sessionmaker
 import app.jobs.example as example_job
 from app.jobs import process_example
 from app.models.example import Example, ExampleStatus
+from config.retries import SharedRetries
 
 
 @pytest.fixture(autouse=True)
@@ -58,10 +58,12 @@ def test_actor_uses_production_retry_options() -> None:
     assert process_example.options["min_backoff"] == 15_000
 
 
+@pytest.mark.parametrize("form", ["canonical", "compact", "braced", "urn", "uppercase"])
 def test_valid_example_logs_success_without_mutating_public_state(
     committed_session: Session,
     actor_session_factory: Callable[[], Session],
     caplog: pytest.LogCaptureFixture,
+    form: str,
 ) -> None:
     example = Example(
         title="Worker example",
@@ -74,8 +76,15 @@ def test_valid_example_logs_success_without_mutating_public_state(
     before = _example_state(example)
     caplog.set_level(logging.INFO, logger=example_job.__name__)
 
-    process_example(str(example.id))
-    process_example(str(example.id))
+    identifier = {
+        "canonical": str(example.id),
+        "compact": example.id.hex,
+        "braced": "{" + str(example.id) + "}",
+        "urn": example.id.urn,
+        "uppercase": str(example.id).upper(),
+    }[form]
+    process_example(identifier)
+    process_example(identifier)
 
     committed_session.expire_all()
     persisted = committed_session.get(Example, example.id)
@@ -84,23 +93,25 @@ def test_valid_example_logs_success_without_mutating_public_state(
     success_records = [record for record in caplog.records if getattr(record, "event", None) == "example.processed"]
     assert len(success_records) == 2
     # `example_id` arrives through logging `extra=`, so it is absent from LogRecord stubs.
-    assert all(record.example_id == str(example.id) for record in success_records)  # type: ignore[attr-defined]
+    assert all(record.example_id == identifier for record in success_records)  # type: ignore[attr-defined]
 
 
+@pytest.mark.parametrize("identifier", ["not-a-uuid", None, 42, True, [], {}])
 def test_malformed_uuid_warns_without_opening_database(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    identifier: object,
 ) -> None:
     session_factory = MagicSessionFactory()
     monkeypatch.setattr(example_job, "get_session_factory", lambda: session_factory)
     caplog.set_level(logging.WARNING, logger=example_job.__name__)
 
-    result = process_example("not-a-uuid")
+    result = process_example(identifier)  # type: ignore[arg-type]
 
     assert result is None
     assert session_factory.calls == 0
     warning = next(record for record in caplog.records if getattr(record, "event", None) == "example.invalid_id")
-    assert warning.example_id == "not-a-uuid"  # type: ignore[attr-defined]
+    assert warning.example_id == str(identifier)  # type: ignore[attr-defined]
 
 
 def test_missing_example_warns_and_returns_successfully(
@@ -156,7 +167,7 @@ def test_worker_retries_operational_error_then_consumes_same_string_message(
     original_options = dict(process_example.options)
     original_actor_broker = process_example.broker
     original_global_broker = dramatiq.get_broker()
-    broker = StubBroker(middleware=[Retries(min_backoff=0, max_backoff=0)])
+    broker = StubBroker(middleware=[SharedRetries(min_backoff=0, max_backoff=0)])
     worker = Worker(broker, worker_timeout=100)
     worker_threads: list[Thread] = []
     consumer_threads: list[Thread] = []

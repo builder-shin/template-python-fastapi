@@ -7,7 +7,7 @@ import re
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
@@ -15,7 +15,7 @@ from typing import Any, Literal, NoReturn
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Select, and_, or_
+from sqlalchemy import BigInteger, ColumnElement, Select, SmallInteger, and_, or_
 from sqlalchemy.orm import InstrumentedAttribute
 from starlette.datastructures import QueryParams
 
@@ -32,6 +32,8 @@ _POSITIVE_INTEGER_PATTERN = re.compile(r"^[0-9]+$")
 _DEFAULT_PAGE_SIZE = 20
 _MAX_PAGE_SIZE = 100
 _MAX_SQL_INTEGER = 2**63 - 1
+# Offset arithmetic is shared with JavaScript backends and must remain exact.
+_MAX_PAGE_OFFSET = 2**53 - 1
 _MAX_SQL_INTEGER_DIGITS = len(str(_MAX_SQL_INTEGER))
 _CURSOR_PARAMETERS = ("page[after]", "page[before]")
 _PAGE_PARAMETERS = frozenset({"page[number]", "page[size]", "page[totals]", *_CURSOR_PARAMETERS})
@@ -104,7 +106,7 @@ class PageSpec:
             raise ValueError("page number must be at least one")
         if not 1 <= self.size <= _MAX_PAGE_SIZE:
             raise ValueError("page size must be between one and one hundred")
-        if (self.number - 1) * self.size > _MAX_SQL_INTEGER:
+        if (self.number - 1) * self.size > _MAX_PAGE_OFFSET:
             raise ValueError("page offset exceeds the supported SQL integer range")
         if self.cursor is not None and self.number != 1:
             raise ValueError("a keyset cursor cannot be combined with a page number")
@@ -361,7 +363,11 @@ def _decode_cursor_value(column: InstrumentedAttribute[Any], raw_value: str, par
                 _raise_query_error("INVALID_PAGE", parameter)
             return raw_value == "true"
         if python_type is int:
-            return int(raw_value)
+            value = int(raw_value)
+            bits = 64 if isinstance(column.type, BigInteger) else 16 if isinstance(column.type, SmallInteger) else 32
+            if not -(2 ** (bits - 1)) <= value < 2 ** (bits - 1):
+                _raise_query_error("INVALID_PAGE", parameter)
+            return value
         if python_type is float:
             return float(raw_value)
         if python_type is Decimal:
@@ -371,12 +377,22 @@ def _decode_cursor_value(column: InstrumentedAttribute[Any], raw_value: str, par
         if python_type is UUID:
             return UUID(raw_value)
         if python_type is datetime:
-            return datetime.fromisoformat(raw_value)
+            return parse_timestamp(raw_value)
         if python_type is date:
             return date.fromisoformat(raw_value)
     except (ArithmeticError, TypeError, ValueError):
         _raise_query_error("INVALID_PAGE", parameter)
     _raise_query_error("INVALID_PAGE", parameter)
+
+
+def parse_timestamp(value: str) -> datetime:
+    """Keep ISO grammar and reject timestamps outside the shared UTC calendar."""
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("datetime must include a UTC offset")
+    # PostgreSQL accepts years that Python cannot return; validate before SQL.
+    parsed.astimezone(UTC)
+    return parsed
 
 
 def encode_cursor(model: object, sorts: Sequence[SortTerm], policy: QueryPolicy) -> str | None:
@@ -487,7 +503,7 @@ def parse_query(query_params: QueryParams, policy: QueryPolicy) -> QuerySpec:
 
         _raise_query_error(_error_code_for_parameter(parameter), parameter)
 
-    if (page_number - 1) * page_size > _MAX_SQL_INTEGER:
+    if (page_number - 1) * page_size > _MAX_PAGE_OFFSET:
         _raise_query_error("INVALID_PAGE", "page[number]")
     if raw_cursors and "page[number]" in seen_page_parameters:
         _raise_query_error("INVALID_PAGE", "page[number]")
@@ -537,7 +553,7 @@ def parse_page_query(query_params: QueryParams) -> PageSpec:
         else:
             page_size = min(parsed_page_value, _MAX_PAGE_SIZE)
 
-    if (page_number - 1) * page_size > _MAX_SQL_INTEGER:
+    if (page_number - 1) * page_size > _MAX_PAGE_OFFSET:
         _raise_query_error("INVALID_PAGE", "page[number]")
     return PageSpec(number=page_number, size=page_size)
 
